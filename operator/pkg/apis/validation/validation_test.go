@@ -279,7 +279,15 @@ cni:
   cniConfDir: "/var/run/multus/cni/net.d"
 `,
 		},
-
+		{
+			desc: "CNIReconcileIptablesOnStartup",
+			yamlStr: `
+cni:
+  ambient:
+    enabled: true
+    reconcileIptablesOnStartup: true
+`,
+		},
 		{
 			desc: "BadIPRange",
 			yamlStr: `
@@ -423,6 +431,61 @@ spec:
 				},
 			},
 			wantWarnings: makeErrors([]string{`detected Cilium CNI with 'enable-bpf-masquerade=true'; this must be set to 'false' when using ambient mode`}),
+		},
+		{
+			desc: "Cilium bpf-lb-sock=true + bpf-lb-sock-hostns-only=false => error",
+			ioYamlStr: `
+spec:
+  components:
+    cni:
+      enabled: true
+`,
+			ciliumConfig: &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "cilium-config"},
+				Data: map[string]string{
+					"bpf-lb-sock":             "true",
+					"bpf-lb-sock-hostns-only": "false",
+				},
+			},
+			wantWarnings: makeErrors([]string{
+				"detected Cilium CNI with 'bpf-lb-sock=true'; this requires 'bpf-lb-sock-hostns-only=true' to be set",
+			}),
+		},
+		{
+			desc: "Cilium kube-proxy-replacement=strict + bpf-lb-sock-hostns-only=false => error",
+			ioYamlStr: `
+spec:
+  components:
+    cni:
+      enabled: true
+`,
+			ciliumConfig: &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "cilium-config"},
+				Data: map[string]string{
+					"kube-proxy-replacement":  "strict",
+					"bpf-lb-sock-hostns-only": "false",
+				},
+			},
+			wantWarnings: makeErrors([]string{
+				"detected Cilium CNI with 'kube-proxy-replacement=strict' and 'bpf-lb-sock-hostns-only=false'; please set 'bpf-lb-sock-hostns-only=true' to avoid conflicts with Istio",
+			}),
+		},
+		{
+			desc: "Cilium kube-proxy-replacement=strict + bpf-lb-sock-hostns-only=true => no error",
+			ioYamlStr: `
+spec:
+  components:
+    cni:
+      enabled: true
+`,
+			ciliumConfig: &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "cilium-config"},
+				Data: map[string]string{
+					"kube-proxy-replacement":  "strict",
+					"bpf-lb-sock-hostns-only": "true",
+				},
+			},
+			wantWarnings: nil,
 		},
 	}
 

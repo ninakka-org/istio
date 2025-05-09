@@ -100,12 +100,6 @@ var skippedEdsConfigs = sets.New(
 	kind.WasmPlugin,
 	kind.ProxyConfig,
 	kind.DNSName,
-
-	kind.KubernetesGateway,
-	kind.HTTPRoute,
-	kind.TCPRoute,
-	kind.TLSRoute,
-	kind.GRPCRoute,
 )
 
 func edsNeedsPush(req *model.PushRequest, proxy *model.Proxy) bool {
@@ -154,7 +148,7 @@ func shouldUseDeltaEds(req *model.PushRequest) bool {
 // This allows us to perform more efficient pushes where we only update the endpoints that did change.
 func canSendPartialFullPushes(req *model.PushRequest) bool {
 	// If we don't know what configs are updated, just send a full push
-	if len(req.ConfigsUpdated) == 0 {
+	if req.Forced {
 		return false
 	}
 	for cfg := range req.ConfigsUpdated {

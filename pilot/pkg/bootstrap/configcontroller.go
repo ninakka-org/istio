@@ -18,8 +18,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -45,6 +47,7 @@ import (
 	"istio.io/istio/pkg/config/analysis/incluster"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvr"
+	"istio.io/istio/pkg/config/validation/agent"
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/revisions"
 	"istio.io/istio/pkg/util/sets"
@@ -94,22 +97,24 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 	// If running in ingress mode (requires k8s), wrap the config controller.
 	if hasKubeRegistry(args.RegistryOptions.Registries) && meshConfig.IngressControllerMode != meshconfig.MeshConfig_OFF {
 		// Wrap the config controller with a cache.
-		s.ConfigStores = append(s.ConfigStores,
-			ingress.NewController(s.kubeClient, s.environment.Watcher, args.RegistryOptions.KubeOptions))
+		ic := ingress.NewController(
+			s.kubeClient,
+			s.environment.Watcher,
+			args.RegistryOptions.KubeOptions,
+			s.XDSServer,
+		)
+		s.ConfigStores = append(s.ConfigStores, ic)
 
 		s.addTerminatingStartFunc("ingress status", func(stop <-chan struct{}) error {
 			leaderelection.
 				NewLeaderElection(args.Namespace, args.PodName, leaderelection.IngressController, args.Revision, s.kubeClient).
 				AddRunFunction(func(leaderStop <-chan struct{}) {
-					ingressSyncer := ingress.NewStatusSyncer(s.environment.Watcher, s.kubeClient)
-					// Start informers again. This fixes the case where informers for namespace do not start,
-					// as we create them only after acquiring the leader lock
-					// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
-					// basically lazy loading the informer, if we stop it when we lose the lock we will never
-					// recreate it again.
-					s.kubeClient.RunAndWait(stop)
-					log.Infof("Starting ingress controller")
-					ingressSyncer.Run(leaderStop)
+					log.Infof("Starting ingress status writer")
+					ic.SetStatusWrite(true, s.statusManager)
+
+					<-leaderStop
+					log.Infof("Stopping ingress status writer")
+					ic.SetStatusWrite(false, nil)
 				}).
 				Run(stop)
 			return nil
@@ -150,14 +155,15 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 		s.XDSServer.ConfigUpdate(&model.PushRequest{
 			Full:   true,
 			Reason: model.NewReasonStats(model.TagUpdate),
+			Forced: true,
 		})
 	})
 	if features.EnableGatewayAPI {
 		if s.statusManager == nil && features.EnableGatewayAPIStatus {
 			s.initStatusManager(args)
 		}
-		gwc := gateway.NewController(s.kubeClient, configController, s.kubeClient.CrdWatcher().WaitForCRD,
-			s.environment.CredentialsController, args.RegistryOptions.KubeOptions)
+		args.RegistryOptions.KubeOptions.KrtDebugger = args.KrtDebugger
+		gwc := gateway.NewController(s.kubeClient, s.kubeClient.CrdWatcher().WaitForCRD, args.RegistryOptions.KubeOptions, s.XDSServer)
 		s.environment.GatewayAPIController = gwc
 		s.ConfigStores = append(s.ConfigStores, s.environment.GatewayAPIController)
 		s.addTerminatingStartFunc("gateway status", func(stop <-chan struct{}) error {
@@ -171,6 +177,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 					s.XDSServer.ConfigUpdate(&model.PushRequest{
 						Full:   true,
 						Reason: model.NewReasonStats(model.GlobalUpdate),
+						Forced: true,
 					})
 					<-leaderStop
 					log.Infof("Stopping gateway status writer")
@@ -188,7 +195,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 						if s.kubeClient.CrdWatcher().WaitForCRD(gvr.KubernetesGateway, leaderStop) {
 							tagWatcher := revisions.NewTagWatcher(s.kubeClient, args.Revision)
 							controller := gateway.NewDeploymentController(s.kubeClient, s.clusterID, s.environment,
-								s.webhookInfo.getWebhookConfig, s.webhookInfo.addHandler, tagWatcher, args.Revision)
+								s.webhookInfo.getWebhookConfig, s.webhookInfo.addHandler, tagWatcher, args.Revision, args.Namespace)
 							// Start informers again. This fixes the case where informers for namespace do not start,
 							// as we create them only after acquiring the leader lock
 							// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
@@ -343,7 +350,14 @@ func (s *Server) makeKubeConfigController(args *PilotArgs) *crdclient.Client {
 		DomainSuffix: args.RegistryOptions.KubeOptions.DomainSuffix,
 		Identifier:   "crd-controller",
 	}
-	return crdclient.New(s.kubeClient, opts)
+
+	schemas := collections.Pilot
+	if features.EnableGatewayAPI {
+		schemas = collections.PilotGatewayAPI()
+	}
+	schemas = schemas.Add(collections.Ingress)
+
+	return crdclient.NewForSchemas(s.kubeClient, opts, schemas)
 }
 
 func (s *Server) makeFileMonitor(fileDir string, domainSuffix string, configController model.ConfigStore) error {
@@ -363,20 +377,20 @@ func (s *Server) makeFileMonitor(fileDir string, domainSuffix string, configCont
 // Implemented only for SIMPLE_TLS mode
 // TODO:
 //
-//	Implement CRL and SANs override for cert verification
 //	Implement for MUTUAL_TLS/ISTIO_MUTUAL_TLS modes
 func (s *Server) getTransportCredentials(args *PilotArgs, tlsSettings *v1alpha3.ClientTLSSettings) (credentials.TransportCredentials, error) {
+	if err := agent.ValidateTLS(args.Namespace, tlsSettings); err != nil && tlsSettings.GetMode() == v1alpha3.ClientTLSSettings_SIMPLE {
+		return nil, err
+	}
 	switch tlsSettings.GetMode() {
 	case v1alpha3.ClientTLSSettings_SIMPLE:
 		if len(tlsSettings.GetCredentialName()) > 0 {
-			if len(tlsSettings.GetCaCertificates()) > 0 {
-				return nil, fmt.Errorf("only one of caCertificates or credentialName can be specified")
-			}
 			rootCert, err := s.getRootCertFromSecret(tlsSettings.GetCredentialName(), args.Namespace)
 			if err != nil {
 				return nil, err
 			}
 			tlsSettings.CaCertificates = string(rootCert.Cert)
+			tlsSettings.CaCrl = string(rootCert.CRL)
 		}
 		if tlsSettings.GetInsecureSkipVerify().GetValue() || len(tlsSettings.GetCaCertificates()) == 0 {
 			return credentials.NewTLS(&tls.Config{
@@ -392,10 +406,61 @@ func (s *Server) getTransportCredentials(args *PilotArgs, tlsSettings *v1alpha3.
 			ServerName:         tlsSettings.GetSni(),
 			InsecureSkipVerify: tlsSettings.GetInsecureSkipVerify().GetValue(), //nolint
 			RootCAs:            certPool,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				return s.verifyCert(rawCerts, tlsSettings)
+			},
 		}), nil
 	default:
 		return insecure.NewCredentials(), nil
 	}
+}
+
+// verifyCert verifies given cert against TLS settings like SANs and CRL.
+func (s *Server) verifyCert(certs [][]byte, tlsSettings *v1alpha3.ClientTLSSettings) error {
+	if len(certs) == 0 {
+		return fmt.Errorf("no certificates provided")
+	}
+	cert, err := x509.ParseCertificate(certs[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	if len(tlsSettings.SubjectAltNames) > 0 {
+		sanMatchFound := false
+		for _, san := range cert.DNSNames {
+			if sanMatchFound {
+				break
+			}
+			for _, name := range tlsSettings.SubjectAltNames {
+				if san == name {
+					sanMatchFound = true
+					break
+				}
+			}
+		}
+		if !sanMatchFound {
+			return fmt.Errorf("no matching SAN found")
+		}
+	}
+
+	if len(tlsSettings.CaCrl) > 0 {
+		crlData := []byte(strings.TrimSpace(tlsSettings.CaCrl))
+		block, _ := pem.Decode(crlData)
+		if block != nil {
+			crlData = block.Bytes
+		}
+		crl, err := x509.ParseRevocationList(crlData)
+		if err != nil {
+			return fmt.Errorf("failed to parse CRL: %w", err)
+		}
+		for _, revokedCert := range crl.RevokedCertificateEntries {
+			if cert.SerialNumber.Cmp(revokedCert.SerialNumber) == 0 {
+				return fmt.Errorf("certificate is revoked")
+			}
+		}
+	}
+
+	return nil
 }
 
 // getRootCertFromSecret fetches a map of keys and values from a secret with name in namespace
@@ -404,5 +469,5 @@ func (s *Server) getRootCertFromSecret(name, namespace string) (*istioCredential
 	if err != nil {
 		return nil, fmt.Errorf("failed to get credential with name %v: %v", name, err)
 	}
-	return kube.ExtractRoot(secret)
+	return kube.ExtractRoot(secret.Data)
 }

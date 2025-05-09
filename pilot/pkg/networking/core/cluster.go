@@ -54,14 +54,15 @@ var deltaConfigTypes = sets.New(kind.ServiceEntry.String(), kind.DestinationRule
 // Cluster type based on resolution
 // For inbound (sidecar only): Cluster for each inbound endpoint port and for each service port
 func (configgen *ConfigGeneratorImpl) BuildClusters(proxy *model.Proxy, req *model.PushRequest) ([]*discovery.Resource, model.XdsLogDetails) {
+	envoyFilterPatches := req.Push.EnvoyFilters(proxy)
 	// In Sotw, we care about all services.
 	var services []*model.Service
 	if features.FilterGatewayClusterConfig && proxy.Type == model.Router {
-		services = req.Push.GatewayServices(proxy)
+		services = req.Push.GatewayServices(proxy, envoyFilterPatches)
 	} else {
 		services = proxy.SidecarScope.Services()
 	}
-	return configgen.buildClusters(proxy, req, services)
+	return configgen.buildClusters(proxy, req, services, envoyFilterPatches)
 }
 
 // BuildDeltaClusters generates the deltas (add and delete) for a given proxy. Currently, only service changes are reflected with deltas.
@@ -69,6 +70,12 @@ func (configgen *ConfigGeneratorImpl) BuildClusters(proxy *model.Proxy, req *mod
 func (configgen *ConfigGeneratorImpl) BuildDeltaClusters(proxy *model.Proxy, updates *model.PushRequest,
 	watched *model.WatchedResource,
 ) ([]*discovery.Resource, []string, model.XdsLogDetails, bool) {
+	// If FilterGatewayClusterConfig is enabled, we need to generate subset of clusters for the gateway.
+	if features.FilterGatewayClusterConfig && proxy.Type == model.Router {
+		cl, lg := configgen.BuildClusters(proxy, updates)
+		return cl, nil, lg, false
+	}
+
 	// if we can't use delta, fall back to generate all
 	if !shouldUseDelta(updates) {
 		cl, lg := configgen.BuildClusters(proxy, updates)
@@ -128,7 +135,8 @@ func (configgen *ConfigGeneratorImpl) BuildDeltaClusters(proxy *model.Proxy, upd
 
 		deletedClusters.InsertAll(deleted...)
 	}
-	clusters, log := configgen.buildClusters(proxy, updates, services)
+	envoyFilterPatches := updates.Push.EnvoyFilters(proxy)
+	clusters, log := configgen.buildClusters(proxy, updates, services, envoyFilterPatches)
 	// DeletedClusters contains list of all subset clusters for the deleted DR or updated DR.
 	// When clusters are rebuilt, we rebuild the subset clusters as well. So, we know what
 	// subset clusters are really needed. So if deleted cluster is not rebuilt, then it is really deleted.
@@ -209,11 +217,10 @@ func (configgen *ConfigGeneratorImpl) deltaFromDestinationRules(updatedDr model.
 
 // buildClusters builds clusters for the proxy with the services passed.
 func (configgen *ConfigGeneratorImpl) buildClusters(proxy *model.Proxy, req *model.PushRequest,
-	services []*model.Service,
+	services []*model.Service, envoyFilterPatches *model.MergedEnvoyFilterWrapper,
 ) ([]*discovery.Resource, model.XdsLogDetails) {
 	clusters := make([]*cluster.Cluster, 0)
 	resources := model.Resources{}
-	envoyFilterPatches := req.Push.EnvoyFilters(proxy)
 	cb := NewClusterBuilder(proxy, req, configgen.Cache)
 	instances := proxy.ServiceTargets
 	cacheStats := cacheStats{}
@@ -240,7 +247,7 @@ func (configgen *ConfigGeneratorImpl) buildClusters(proxy *model.Proxy, req *mod
 		_, wps := findWaypointResources(proxy, req.Push)
 		// Waypoint proxies do not need outbound clusters in most cases, unless we have a route pointing to something
 		outboundPatcher := clusterPatcher{efw: envoyFilterPatches, pctx: networking.EnvoyFilter_SIDECAR_OUTBOUND}
-		extraNamespacedHosts, extraHosts := req.Push.ExtraWaypointServices(proxy)
+		extraNamespacedHosts, extraHosts := req.Push.ExtraWaypointServices(proxy, envoyFilterPatches)
 		ob, cs := configgen.buildOutboundClusters(cb, proxy, outboundPatcher, filterWaypointOutboundServices(
 			req.Push.ServicesAttachedToMesh(), wps.services, extraNamespacedHosts, extraHosts, services))
 		cacheStats = cacheStats.merge(cs)
@@ -284,7 +291,7 @@ func (configgen *ConfigGeneratorImpl) buildClusters(proxy *model.Proxy, req *mod
 }
 
 func shouldUseDelta(updates *model.PushRequest) bool {
-	return updates != nil && deltaAwareConfigTypes(updates.ConfigsUpdated) && len(updates.ConfigsUpdated) > 0
+	return updates != nil && !updates.Forced && deltaAwareConfigTypes(updates.ConfigsUpdated)
 }
 
 // deltaAwareConfigTypes returns true if all updated configs are delta enabled.
@@ -740,8 +747,9 @@ type buildClusterOpts struct {
 	// Indicates the service registry of the cluster being built.
 	serviceRegistry provider.ID
 	// Indicates if the destinationRule has a workloadSelector
-	isDrWithSelector      bool
-	credentialSocketExist bool
+	isDrWithSelector          bool
+	credentialSocketExist     bool
+	fileCredentialSocketExist bool
 }
 
 func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, tcp *networking.ConnectionPoolSettings_TCPSettings) {

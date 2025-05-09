@@ -25,6 +25,7 @@ import (
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/ptr"
+	"istio.io/istio/pkg/slices"
 )
 
 // delayedClient is a client wrapper that initially starts with an "empty client",
@@ -58,6 +59,7 @@ func (r delayedHandlerRegistration) HasSynced() bool {
 }
 
 type delayedIndex[T any] struct {
+	name    string
 	indexer *atomic.Pointer[RawIndexer]
 	extract func(o T) []string
 }
@@ -70,13 +72,13 @@ func (d delayedIndex[T]) Lookup(key string) []interface{} {
 	return nil
 }
 
-func (s *delayedClient[T]) Index(extract func(o T) []string) RawIndexer {
+func (s *delayedClient[T]) Index(name string, extract func(o T) []string) RawIndexer {
 	if c := s.inf.Load(); c != nil {
-		return (*c).Index(extract)
+		return (*c).Index(name, extract)
 	}
 	s.hm.Lock()
 	defer s.hm.Unlock()
-	di := delayedIndex[T]{indexer: new(atomic.Pointer[RawIndexer]), extract: extract}
+	di := delayedIndex[T]{name: name, indexer: new(atomic.Pointer[RawIndexer]), extract: extract}
 	s.indexers = append(s.indexers, di)
 	return di
 }
@@ -148,6 +150,18 @@ func (s *delayedClient[T]) ShutdownHandlers() {
 	}
 }
 
+func (s *delayedClient[T]) ShutdownHandler(registration cache.ResourceEventHandlerRegistration) {
+	if c := s.inf.Load(); c != nil {
+		(*c).ShutdownHandlers()
+	} else {
+		s.hm.Lock()
+		defer s.hm.Unlock()
+		s.handlers = slices.FilterInPlace(s.handlers, func(handler delayedHandler) bool {
+			return handler.hasSynced != registration
+		})
+	}
+}
+
 func (s *delayedClient[T]) Start(stop <-chan struct{}) {
 	if c := s.inf.Load(); c != nil {
 		(*c).Start(stop)
@@ -170,7 +184,7 @@ func (s *delayedClient[T]) set(inf Informer[T]) {
 		}
 		s.handlers = nil
 		for _, i := range s.indexers {
-			res := inf.Index(i.extract)
+			res := inf.Index(i.name, i.extract)
 			i.indexer.Store(&res)
 		}
 		s.indexers = nil

@@ -49,7 +49,7 @@ endif
 export VERSION
 
 # Base version of Istio image to use
-BASE_VERSION ?= master-2025-02-07T19-01-40
+BASE_VERSION ?= master-2025-04-07T19-01-16
 ISTIO_BASE_REGISTRY ?= gcr.io/istio-release
 
 export GO111MODULE ?= on
@@ -213,10 +213,11 @@ STANDARD_BINARIES:=./istioctl/cmd/istioctl \
   ./pkg/test/echo/cmd/server \
   ./samples/extauthz/cmd/extauthz
 
+CNI_BINARIES:=./cni/cmd/istio-cni \
+	./cni/cmd/install-cni
 # These are binaries that require Linux to build, and should
 # be skipped on other platforms. Notably this includes the current Linux-only Istio CNI plugin
-LINUX_AGENT_BINARIES:=./cni/cmd/istio-cni \
-  ./cni/cmd/install-cni \
+LINUX_AGENT_BINARIES:=$(CNI_BINARIES) \
   $(AGENT_BINARIES)
 
 BINARIES:=$(STANDARD_BINARIES) $(AGENT_BINARIES) $(LINUX_AGENT_BINARIES)
@@ -245,6 +246,10 @@ build: depend ## Builds all go binaries.
 build-linux: depend
 	GOOS=linux GOARCH=$(GOARCH_LOCAL) LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $(TARGET_OUT_LINUX)/ -tags=$(STANDARD_TAGS) $(STANDARD_BINARIES)
 	GOOS=linux GOARCH=$(GOARCH_LOCAL) LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $(TARGET_OUT_LINUX)/ -tags=$(AGENT_TAGS) $(LINUX_AGENT_BINARIES)
+
+.PHONY: build-cni
+build-cni: depend
+	GOOS=$(GOOS_LOCAL) GOARCH=$(GOARCH_LOCAL) LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $(TARGET_OUT)/ -tags=$(AGENT_TAGS) $(CNI_BINARIES)
 
 # Create targets for TARGET_OUT_LINUX/binary
 # There are two use cases here:
@@ -301,10 +306,6 @@ refresh-goldens:
 		./istioctl/pkg/writer/ztunnel/configdump/...
 
 update-golden: refresh-goldens
-
-# Keep dummy target since some build pipelines depend on this
-gen-charts:
-	@echo "This target is no longer required and will be removed in the future"
 
 gen-addons:
 	manifests/addons/gen.sh

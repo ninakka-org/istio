@@ -113,11 +113,17 @@ func SelectVirtualServices(vsidx virtualServiceIndex, configNamespace string, ho
 	return importedVirtualServices
 }
 
-func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta config.Meta) {
-	// Kubernetes Gateway API semantics support shortnames
-	if UseGatewaySemantics(config.Config{Meta: meta}) {
-		return
+func resolveVirtualServiceShortnames(config config.Config) config.Config {
+	// Kubernetes Gateway API semantics do not support shortnames
+	if UseGatewaySemantics(config) {
+		return config
 	}
+
+	// values returned from ConfigStore.List are immutable.
+	// Therefore, we make a copy
+	r := config.DeepCopy()
+	rule := r.Spec.(*networking.VirtualService)
+	meta := r.Meta
 
 	// resolve top level hosts
 	for i, h := range rule.Hosts {
@@ -182,6 +188,7 @@ func resolveVirtualServiceShortnames(rule *networking.VirtualService, meta confi
 			}
 		}
 	}
+	return r
 }
 
 // Return merged virtual services and the root->delegate vs map
@@ -573,58 +580,4 @@ func UseIngressSemantics(cfg config.Config) bool {
 // semantics.
 func UseGatewaySemantics(cfg config.Config) bool {
 	return cfg.Annotations[constants.InternalRouteSemantics] == constants.RouteSemanticsGateway
-}
-
-// VirtualServiceDependencies returns dependent configs of the vs,
-// for internal vs generated from gateway-api routes, it returns the parent routes,
-// otherwise it just returns the vs as is.
-func VirtualServiceDependencies(vs config.Config) []ConfigKey {
-	if !UseGatewaySemantics(vs) {
-		return []ConfigKey{
-			{
-				Kind:      kind.VirtualService,
-				Namespace: vs.Namespace,
-				Name:      vs.Name,
-			},
-		}
-	}
-
-	// synthetic vs, get internal parents
-	internalParents := strings.Split(vs.Annotations[constants.InternalParentNames], ",")
-	out := make([]ConfigKey, 0, len(internalParents))
-	for _, p := range internalParents {
-		// kind/name.namespace
-		ks, nsname, ok := strings.Cut(p, "/")
-		if !ok {
-			log.Errorf("invalid InternalParentName parts: %s", p)
-			continue
-		}
-		var k kind.Kind
-		switch ks {
-		case kind.HTTPRoute.String():
-			k = kind.HTTPRoute
-		case kind.TCPRoute.String():
-			k = kind.TCPRoute
-		case kind.TLSRoute.String():
-			k = kind.TLSRoute
-		case kind.GRPCRoute.String():
-			k = kind.GRPCRoute
-		case kind.UDPRoute.String():
-			k = kind.UDPRoute
-		default:
-			// shouldn't happen
-			continue
-		}
-		name, ns, ok := strings.Cut(nsname, ".")
-		if !ok {
-			log.Errorf("invalid InternalParentName name: %s", nsname)
-			continue
-		}
-		out = append(out, ConfigKey{
-			Kind:      k,
-			Name:      name,
-			Namespace: ns,
-		})
-	}
-	return out
 }

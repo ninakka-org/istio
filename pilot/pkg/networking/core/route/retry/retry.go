@@ -24,7 +24,6 @@ import (
 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/util/protoconv"
 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
 )
@@ -43,16 +42,12 @@ func DefaultPolicy() *route.RetryPolicy {
 }
 
 func defaultPolicy() *route.RetryPolicy {
-	policy := route.RetryPolicy{
+	return &route.RetryPolicy{
 		NumRetries: &wrappers.UInt32Value{Value: 2},
 		RetryOn:    "connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes",
 		// TODO: allow this to be configured via API.
 		HostSelectionRetryMaxAttempts: 5,
 	}
-	if !features.Exclude503FromDefaultRetries {
-		policy.RetriableStatusCodes = []uint32{http.StatusServiceUnavailable}
-	}
-	return &policy
 }
 
 // DefaultConsistentHashPolicy gets a copy of the default retry policy without previous host predicate.
@@ -109,12 +104,31 @@ func ConvertPolicy(in *networking.HTTPRetry, hashPolicy bool) *route.RetryPolicy
 		out.PerTryTimeout = in.PerTryTimeout
 	}
 
+	// User has specified RetryIgnorePreviousHosts, so honor it.
+	if in.RetryIgnorePreviousHosts != nil {
+		var retryHostPredicate []*route.RetryPolicy_RetryHostPredicate
+		if in.RetryIgnorePreviousHosts.GetValue() {
+			retryHostPredicate = []*route.RetryPolicy_RetryHostPredicate{
+				// to configure retries to prefer hosts that haven’t been attempted already,
+				// the builtin `envoy.retry_host_predicates.previous_hosts` predicate can be used.
+				xdsfilters.RetryPreviousHosts,
+			}
+		}
+		out.RetryHostPredicate = retryHostPredicate
+	}
+
 	if in.RetryRemoteLocalities != nil && in.RetryRemoteLocalities.GetValue() {
 		out.RetryPriority = &route.RetryPolicy_RetryPriority{
 			Name: "envoy.retry_priorities.previous_priorities",
 			ConfigType: &route.RetryPolicy_RetryPriority_TypedConfig{
 				TypedConfig: defaultRetryPriorityTypedConfig,
 			},
+		}
+	}
+
+	if in.Backoff != nil {
+		out.RetryBackOff = &route.RetryPolicy_RetryBackOff{
+			BaseInterval: in.Backoff,
 		}
 	}
 

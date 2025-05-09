@@ -113,20 +113,20 @@ func (i internalIndex) Lookup(key string) []any {
 
 var _ RawIndexer = internalIndex{}
 
-func (n *informerClient[T]) Index(extract func(o T) []string) RawIndexer {
-	// We just need some unique key, any will do
-	key := fmt.Sprintf("%p", extract)
-	if err := n.informer.AddIndexers(map[string]cache.IndexFunc{
-		key: func(obj any) ([]string, error) {
-			t := controllers.Extract[T](obj)
-			return extract(t), nil
-		},
-	}); err != nil {
-		// Should only happen on key conflict or on stop
-		log.Warnf("failed to add indexer: %v", err)
+func (n *informerClient[T]) Index(name string, extract func(o T) []string) RawIndexer {
+	if _, ok := n.informer.GetIndexer().GetIndexers()[name]; !ok {
+		if err := n.informer.AddIndexers(map[string]cache.IndexFunc{
+			name: func(obj any) ([]string, error) {
+				t := controllers.Extract[T](obj)
+				return extract(t), nil
+			},
+		}); err != nil {
+			// Should only happen on key conflict or on stop
+			log.Warnf("failed to add indexer: %v", err)
+		}
 	}
 	ret := internalIndex{
-		key:     key,
+		key:     name,
 		indexer: n.informer.GetIndexer(),
 		filter:  n.filter,
 	}
@@ -180,6 +180,16 @@ func (n *informerClient[T]) ShutdownHandlers() {
 	for _, c := range n.registeredHandlers {
 		_ = n.informer.RemoveEventHandler(c.registration)
 	}
+	n.registeredHandlers = nil
+}
+
+func (n *informerClient[T]) ShutdownHandler(registration cache.ResourceEventHandlerRegistration) {
+	n.handlerMu.Lock()
+	defer n.handlerMu.Unlock()
+	n.registeredHandlers = slices.FilterInPlace(n.registeredHandlers, func(h handlerRegistration) bool {
+		return h.registration != registration
+	})
+	_ = n.informer.RemoveEventHandler(registration)
 }
 
 type neverReady struct{}

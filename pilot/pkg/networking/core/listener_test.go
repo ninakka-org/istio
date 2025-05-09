@@ -26,6 +26,7 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	tracing "github.com/envoyproxy/go-control-plane/envoy/type/tracing/v3"
 	xdstype "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
@@ -42,6 +43,7 @@ import (
 	telemetry "istio.io/api/telemetry/v1alpha1"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
+	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/networking/core/listenertest"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
@@ -241,10 +243,10 @@ func TestInboundListenerConfig(t *testing.T) {
 			// Ext auth makes 2 filters
 			wellknown.HTTPRoleBasedAccessControl,
 			wellknown.HTTPExternalAuthorization,
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-authn",
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-authz",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-authn",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-authz",
 			wellknown.HTTPRoleBasedAccessControl,
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-stats",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-stats",
 			wellknown.HTTPGRPCStats,
 			xdsfilters.Fault.Name,
 			xdsfilters.Cors.Name,
@@ -253,9 +255,9 @@ func TestInboundListenerConfig(t *testing.T) {
 		}
 		httpNetworkFilters := []string{
 			xdsfilters.MxFilterName,
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authn",
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authz",
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-stats",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-authn",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-authz",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-stats",
 			wellknown.HTTPConnectionManager,
 		}
 		tcpNetworkFilters := []string{
@@ -263,10 +265,10 @@ func TestInboundListenerConfig(t *testing.T) {
 			// Ext auth makes 2 filters
 			wellknown.RoleBasedAccessControl,
 			wellknown.ExternalAuthorization,
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authn",
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authz",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-authn",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-authz",
 			wellknown.RoleBasedAccessControl,
-			"extenstions.istio.io/wasmplugin/istio-system.wasm-network-stats",
+			"extensions.istio.io/wasmplugin/istio-system.wasm-network-stats",
 			xds.StatsFilterName,
 			wellknown.TCPProxy,
 		}
@@ -1178,9 +1180,9 @@ func TestOutboundFilters(t *testing.T) {
 					TotalMatch: true,
 					HTTPFilters: []string{
 						xdsfilters.MxFilterName,
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-authn",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-authz",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-stats",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-authn",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-authz",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-stats",
 						wellknown.HTTPGRPCStats,
 						xdsfilters.AlpnFilterName,
 						xdsfilters.Fault.Name,
@@ -1189,9 +1191,9 @@ func TestOutboundFilters(t *testing.T) {
 						wellknown.Router,
 					},
 					NetworkFilters: []string{
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authn",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authz",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-stats",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-authn",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-authz",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-stats",
 						wellknown.HTTPConnectionManager,
 					},
 				},
@@ -1214,9 +1216,9 @@ func TestOutboundFilters(t *testing.T) {
 				{
 					TotalMatch: true,
 					NetworkFilters: []string{
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authn",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-authz",
-						"extenstions.istio.io/wasmplugin/istio-system.wasm-network-stats",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-authn",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-authz",
+						"extensions.istio.io/wasmplugin/istio-system.wasm-network-stats",
 						xds.StatsFilterName,
 						wellknown.TCPProxy,
 					},
@@ -3096,6 +3098,212 @@ func TestOutboundListenerConfig_WithAutoAllocatedAddress(t *testing.T) {
 						t.Errorf("Expected %d listeners on service port 79, got %d (%v)", tt.numListenersOnServicePort, len(listenersToCheck), listenersToCheck)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestListenerTransportSocketConnectTimeoutForSidecar(t *testing.T) {
+	cases := []struct {
+		name            string
+		expectedTimeout int64
+		services        []*model.Service
+	}{
+		{
+			name:            "should set timeout",
+			expectedTimeout: durationpb.New(defaultGatewayTransportSocketConnectTimeout).GetSeconds(),
+			services: []*model.Service{
+				buildService("test.com", "1.2.3.4", protocol.TCP, tnow.Add(1*time.Second)),
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			p := getProxy()
+			listeners := buildOutboundListeners(t, p, nil, nil, tt.services...)
+			for _, l := range listeners {
+				for _, fc := range l.FilterChains {
+					if fc.TransportSocketConnectTimeout == nil || fc.TransportSocketConnectTimeout.Seconds != tt.expectedTimeout {
+						t.Errorf("expected transport socket connect timeout to be %v for listener %s filter chain %s, got %v",
+							tt.expectedTimeout, l.Name, fc.Name, fc.TransportSocketConnectTimeout)
+					}
+				}
+				if l.DefaultFilterChain != nil {
+					fc := l.DefaultFilterChain
+					if fc.TransportSocketConnectTimeout == nil || fc.TransportSocketConnectTimeout.Seconds != tt.expectedTimeout {
+						t.Errorf("expected transport socket connect timeout to be %v for listener %s default filter chain, got %v",
+							tt.expectedTimeout, l.Name, fc.TransportSocketConnectTimeout)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBuildListenerTLSContext(t *testing.T) {
+	tests := []struct {
+		name                    string
+		serverTLSSettings       *networking.ServerTLSSettings
+		proxy                   *model.Proxy
+		mesh                    *meshconfig.MeshConfig
+		transportProtocol       istionetworking.TransportProtocol
+		gatewayTCPServerWithTLS bool
+		expectedCertCount       int
+		expectedValidation      bool
+	}{
+		{
+			name: "single certificate with credential name",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:           networking.ServerTLSSettings_SIMPLE,
+				CredentialName: "test-cert",
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       1,
+			expectedValidation:      false,
+		},
+		{
+			name: "multiple certificates with credential names",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:            networking.ServerTLSSettings_SIMPLE,
+				CredentialNames: []string{"rsa-cert", "ecdsa-cert"},
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       2,
+			expectedValidation:      false,
+		},
+		{
+			name: "multiple certificates with mutual TLS",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:            networking.ServerTLSSettings_MUTUAL,
+				CredentialNames: []string{"rsa-cert", "ecdsa-cert"},
+				SubjectAltNames: []string{"test.com"},
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       2,
+			expectedValidation:      true,
+		},
+		{
+			name: "SIMPLE and Server certificate",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:              networking.ServerTLSSettings_SIMPLE,
+				ServerCertificate: "/path/to/cert.pem",
+				PrivateKey:        "/path/to/key.pem",
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       1,
+			expectedValidation:      false,
+		},
+		{
+			name: "SIMPLE and TLS certificates",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode: networking.ServerTLSSettings_SIMPLE,
+				TlsCertificates: []*networking.ServerTLSSettings_TLSCertificate{
+					{
+						ServerCertificate: "/path/to/cert.pem",
+						PrivateKey:        "/path/to/key.pem",
+					},
+					{
+						ServerCertificate: "/path/to/cert2.pem",
+						PrivateKey:        "/path/to/key2.pem",
+					},
+				},
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       2,
+			expectedValidation:      false,
+		},
+		{
+			name: "MUTUAL and server certificate",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:              networking.ServerTLSSettings_MUTUAL,
+				CaCertificates:    "/path/to/ca.pem",
+				ServerCertificate: "/path/to/cert.pem",
+				PrivateKey:        "/path/to/key.pem",
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       1,
+			expectedValidation:      true,
+		},
+		{
+			name: "MUTUAL and TLS certificates",
+			serverTLSSettings: &networking.ServerTLSSettings{
+				Mode:           networking.ServerTLSSettings_MUTUAL,
+				CaCertificates: "/path/to/ca.pem",
+				TlsCertificates: []*networking.ServerTLSSettings_TLSCertificate{
+					{
+						ServerCertificate: "/path/to/cert.pem",
+						PrivateKey:        "/path/to/key.pem",
+					},
+					{
+						ServerCertificate: "/path/to/cert2.pem",
+						PrivateKey:        "/path/to/key2.pem",
+					},
+				},
+			},
+			proxy: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			mesh:                    &meshconfig.MeshConfig{},
+			transportProtocol:       istionetworking.TransportProtocolTCP,
+			gatewayTCPServerWithTLS: false,
+			expectedCertCount:       2,
+			expectedValidation:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := BuildListenerTLSContext(tt.serverTLSSettings, tt.proxy, tt.mesh, tt.transportProtocol, tt.gatewayTCPServerWithTLS)
+
+			// Check certificate count
+			if len(ctx.CommonTlsContext.TlsCertificateSdsSecretConfigs) != tt.expectedCertCount {
+				t.Errorf("expected %d certificates, got %d", tt.expectedCertCount, len(ctx.CommonTlsContext.TlsCertificateSdsSecretConfigs))
+			}
+
+			// Check validation context
+			if tt.expectedValidation {
+				if ctx.CommonTlsContext.ValidationContextType == nil {
+					t.Error("expected validation context to be set")
+				}
+				combinedCtx, ok := ctx.CommonTlsContext.ValidationContextType.(*tls.CommonTlsContext_CombinedValidationContext)
+				if !ok {
+					t.Error("expected CombinedValidationContext")
+				}
+				if combinedCtx.CombinedValidationContext == nil {
+					t.Error("expected CombinedValidationContext to be set")
+				}
+			} else if ctx.CommonTlsContext.ValidationContextType != nil {
+				t.Error("unexpected validation context")
 			}
 		})
 	}

@@ -39,6 +39,7 @@ var (
 	methodFieldRegex         = regexp.MustCompile(string(MethodField) + "=(.*)")
 	protocolFieldRegex       = regexp.MustCompile(string(ProtocolField) + "=(.*)")
 	alpnFieldRegex           = regexp.MustCompile(string(AlpnField) + "=(.*)")
+	sniFieldRegex            = regexp.MustCompile(string(SNIField) + "=(.*)")
 	proxyProtocolFieldRegex  = regexp.MustCompile(string(ProxyProtocolField) + "=(.*)")
 )
 
@@ -76,6 +77,11 @@ func parseResponse(output string) Response {
 	match = alpnFieldRegex.FindStringSubmatch(output)
 	if match != nil {
 		out.Alpn = match[1]
+	}
+
+	match = sniFieldRegex.FindStringSubmatch(output)
+	if match != nil {
+		out.SNI = match[1]
 	}
 
 	match = proxyProtocolFieldRegex.FindStringSubmatch(output)
@@ -141,7 +147,7 @@ func parseResponse(output string) Response {
 		if len(sl) != 2 {
 			continue
 		}
-		out.RequestHeaders.Set(sl[0], sl[1])
+		out.RequestHeaders.Add(sl[0], sl[1])
 	}
 
 	matches = responseHeaderFieldRegex.FindAllStringSubmatch(output, -1)
@@ -150,7 +156,7 @@ func parseResponse(output string) Response {
 		if len(sl) != 2 {
 			continue
 		}
-		out.ResponseHeaders.Set(sl[0], sl[1])
+		out.ResponseHeaders.Add(sl[0], sl[1])
 	}
 
 	for _, l := range strings.Split(output, "\n") {

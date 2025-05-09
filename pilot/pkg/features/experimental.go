@@ -182,10 +182,6 @@ var (
 	Enable100ContinueHeaders = env.Register("ENABLE_100_CONTINUE_HEADERS", true,
 		"If enabled, istiod will proxy 100-continue headers as is").Get()
 
-	EnableDeferredClusterCreation = env.Register("ENABLE_DEFERRED_CLUSTER_CREATION", true,
-		"If enabled, Istio will create clusters only when there are requests. This will save memory and CPU cycles"+
-			" in cases where there are lots of inactive clusters and > 1 worker thread").Get()
-
 	EnableDeferredStatsCreation = env.Register("ENABLE_DEFERRED_STATS_CREATION", true,
 		"If enabled, Istio will lazily initialize a subset of the stats").Get()
 
@@ -202,4 +198,7 @@ var (
 
 	UnifiedSidecarScoping = env.Register("PILOT_UNIFIED_SIDECAR_SCOPE", true,
 		"If true, unified SidecarScope creation will be used. This is only intended as a temporary feature flag for backwards compatibility.").Get()
+
+	CACertConfigMapName = env.Register("PILOT_CA_CERT_CONFIGMAP", "istio-ca-root-cert",
+		"The name of the ConfigMap that stores the Root CA Certificate that is used by istiod").Get()
 )

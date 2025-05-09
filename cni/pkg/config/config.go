@@ -48,6 +48,9 @@ type InstallConfig struct {
 	// Comma-separated list of K8S namespaces that CNI should ignore
 	ExcludeNamespaces string
 
+	// Singular namespace that the istio CNI node agent resides in
+	PodNamespace string
+
 	// KUBERNETES_SERVICE_PROTOCOL
 	K8sServiceProtocol string
 	// KUBERNETES_SERVICE_HOST
@@ -73,6 +76,9 @@ type InstallConfig struct {
 
 	// Whether ambient is enabled
 	AmbientEnabled bool
+
+	// The labelSelector to enable ambient for specific pods or namespaces
+	AmbientEnablementSelector string
 
 	// Whether ambient DNS capture is enabled
 	AmbientDNSCapture bool
@@ -133,6 +139,7 @@ func (c InstallConfig) String() string {
 	b.WriteString("SkipTLSVerify: " + fmt.Sprint(c.SkipTLSVerify) + "\n")
 
 	b.WriteString("ExcludeNamespaces: " + fmt.Sprint(c.ExcludeNamespaces) + "\n")
+	b.WriteString("PodNamespace: " + fmt.Sprint(c.PodNamespace) + "\n")
 	b.WriteString("K8sServiceProtocol: " + c.K8sServiceProtocol + "\n")
 	b.WriteString("K8sServiceHost: " + c.K8sServiceHost + "\n")
 	b.WriteString("K8sServicePort: " + fmt.Sprint(c.K8sServicePort) + "\n")
@@ -145,10 +152,10 @@ func (c InstallConfig) String() string {
 	b.WriteString("ZtunnelUDSAddress: " + fmt.Sprint(c.ZtunnelUDSAddress) + "\n")
 
 	b.WriteString("AmbientEnabled: " + fmt.Sprint(c.AmbientEnabled) + "\n")
+	b.WriteString("AmbientEnablementSelector: " + c.AmbientEnablementSelector + "\n")
 	b.WriteString("AmbientDNSCapture: " + fmt.Sprint(c.AmbientDNSCapture) + "\n")
 	b.WriteString("AmbientIPv6: " + fmt.Sprint(c.AmbientIPv6) + "\n")
 	b.WriteString("AmbientDisableSafeUpgrade: " + fmt.Sprint(c.AmbientDisableSafeUpgrade) + "\n")
-
 	b.WriteString("AmbientReconcilePodRulesOnStartup: " + fmt.Sprint(c.AmbientReconcilePodRulesOnStartup) + "\n")
 	return b.String()
 }

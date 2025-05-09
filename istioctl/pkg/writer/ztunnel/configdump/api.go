@@ -40,6 +40,7 @@ type ZtunnelWorkload struct {
 	Network               string            `json:"network,omitempty"`
 	Status                string            `json:"status"`
 	Hostname              string            `json:"hostname"`
+	Capacity              uint32            `json:"capacity"`
 	ApplicationTunnel     ApplicationTunnel `json:"applicationTunnel,omitempty"`
 	AuthorizationPolicies []string          `json:"authorizationPolicies,omitempty"`
 }
@@ -126,6 +127,7 @@ type CertsDump struct {
 	Identity  string  `json:"identity"`
 	State     string  `json:"state"`
 	CertChain []*Cert `json:"certChain"`
+	RootCert  []*Cert `json:"rootCerts"`
 }
 
 type Cert struct {
@@ -157,12 +159,14 @@ type InboundConnection struct {
 	Src         string `json:"src"`
 	OriginalDst string `json:"originalDst"`
 	ActualDst   string `json:"actualDst"`
+	Protocol    string `json:"protocol"`
 }
 
 type OutboundConnection struct {
 	Src         string `json:"src"`
 	OriginalDst string `json:"originalDst"`
 	ActualDst   string `json:"actualDst"`
+	Protocol    string `json:"protocol"`
 }
 
 type WorkloadConnection struct {

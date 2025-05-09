@@ -151,48 +151,48 @@ func New(options Options) Index {
 	filter := kclient.Filter{
 		ObjectFilter: options.Client.ObjectFilter(),
 	}
-	opts := krt.NewOptionsBuilder(a.stop, options.Debugger)
+	opts := krt.NewOptionsBuilder(a.stop, "ambient", options.Debugger)
 
 	MeshConfig := options.MeshConfig
 	authzPolicies := kclient.NewDelayedInformer[*securityclient.AuthorizationPolicy](options.Client,
 		gvr.AuthorizationPolicy, kubetypes.StandardInformer, filter)
-	AuthzPolicies := krt.WrapClient[*securityclient.AuthorizationPolicy](authzPolicies, opts.WithName("AuthorizationPolicies")...)
+	AuthzPolicies := krt.WrapClient[*securityclient.AuthorizationPolicy](authzPolicies, opts.WithName("informer/AuthorizationPolicies")...)
 
 	peerAuths := kclient.NewDelayedInformer[*securityclient.PeerAuthentication](options.Client,
 		gvr.PeerAuthentication, kubetypes.StandardInformer, filter)
-	PeerAuths := krt.WrapClient[*securityclient.PeerAuthentication](peerAuths, opts.WithName("PeerAuthentications")...)
+	PeerAuths := krt.WrapClient[*securityclient.PeerAuthentication](peerAuths, opts.WithName("informer/PeerAuthentications")...)
 
 	serviceEntries := kclient.NewDelayedInformer[*networkingclient.ServiceEntry](options.Client,
 		gvr.ServiceEntry, kubetypes.StandardInformer, filter)
-	ServiceEntries := krt.WrapClient[*networkingclient.ServiceEntry](serviceEntries, opts.WithName("ServiceEntries")...)
+	ServiceEntries := krt.WrapClient[*networkingclient.ServiceEntry](serviceEntries, opts.WithName("informer/ServiceEntries")...)
 
 	workloadEntries := kclient.NewDelayedInformer[*networkingclient.WorkloadEntry](options.Client,
 		gvr.WorkloadEntry, kubetypes.StandardInformer, filter)
-	WorkloadEntries := krt.WrapClient[*networkingclient.WorkloadEntry](workloadEntries, opts.WithName("WorkloadEntries")...)
+	WorkloadEntries := krt.WrapClient[*networkingclient.WorkloadEntry](workloadEntries, opts.WithName("informer/WorkloadEntries")...)
 
 	gatewayClient := kclient.NewDelayedInformer[*v1beta1.Gateway](options.Client, gvr.KubernetesGateway, kubetypes.StandardInformer, filter)
-	Gateways := krt.WrapClient[*v1beta1.Gateway](gatewayClient, opts.WithName("Gateways")...)
+	Gateways := krt.WrapClient[*v1beta1.Gateway](gatewayClient, opts.WithName("informer/Gateways")...)
 
 	gatewayClassClient := kclient.NewDelayedInformer[*v1beta1.GatewayClass](options.Client, gvr.GatewayClass, kubetypes.StandardInformer, filter)
-	GatewayClasses := krt.WrapClient[*v1beta1.GatewayClass](gatewayClassClient, opts.WithName("GatewayClasses")...)
+	GatewayClasses := krt.WrapClient[*v1beta1.GatewayClass](gatewayClassClient, opts.WithName("informer/GatewayClasses")...)
 
 	servicesClient := kclient.NewFiltered[*v1.Service](options.Client, filter)
-	Services := krt.WrapClient[*v1.Service](servicesClient, opts.WithName("Services")...)
+	Services := krt.WrapClient[*v1.Service](servicesClient, opts.WithName("informer/Services")...)
 	Nodes := krt.NewInformerFiltered[*v1.Node](options.Client, kclient.Filter{
 		ObjectFilter:    options.Client.ObjectFilter(),
 		ObjectTransform: kubeclient.StripNodeUnusedFields,
-	}, opts.WithName("Nodes")...)
+	}, opts.WithName("informer/Nodes")...)
 	Pods := krt.NewInformerFiltered[*v1.Pod](options.Client, kclient.Filter{
 		ObjectFilter:    options.Client.ObjectFilter(),
 		ObjectTransform: kubeclient.StripPodUnusedFields,
-	}, opts.WithName("Pods")...)
+	}, opts.WithName("informer/Pods")...)
 
 	// TODO: Should this go ahead and transform the full ns into some intermediary with just the details we care about?
-	Namespaces := krt.NewInformer[*v1.Namespace](options.Client, opts.WithName("Namespaces")...)
+	Namespaces := krt.NewInformer[*v1.Namespace](options.Client, opts.WithName("informer/Namespaces")...)
 
 	EndpointSlices := krt.NewInformerFiltered[*discovery.EndpointSlice](options.Client, kclient.Filter{
 		ObjectFilter: options.Client.ObjectFilter(),
-	}, opts.WithName("EndpointSlices")...)
+	}, opts.WithName("informer/EndpointSlices")...)
 
 	Networks := buildNetworkCollections(Namespaces, Gateways, options, opts)
 	a.networks = Networks
@@ -221,6 +221,8 @@ func New(options Options) Index {
 			Waypoints,
 			Services,
 			ServiceEntries,
+			GatewayClasses,
+			MeshConfig,
 			Namespaces,
 			opts,
 		)
@@ -244,13 +246,18 @@ func New(options Options) Index {
 		a.statusQueue = statusQueue
 	}
 
-	ServiceAddressIndex := krt.NewIndex[networkAddress, model.ServiceInfo](WorkloadServices, networkAddressFromService)
-	ServiceInfosByOwningWaypointHostname := krt.NewIndex(WorkloadServices, func(s model.ServiceInfo) []NamespaceHostname {
+	ServiceAddressIndex := krt.NewIndex[networkAddress, model.ServiceInfo](WorkloadServices, "serviceAddress", networkAddressFromService)
+	ServiceInfosByOwningWaypointHostname := krt.NewIndex(WorkloadServices, "namespaceHostname", func(s model.ServiceInfo) []NamespaceHostname {
 		// Filter out waypoint services
 		// TODO: we are looking at the *selector* -- we should be looking the labels themselves or something equivalent.
 		if s.LabelSelector.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayMeshControllerLabel {
 			return nil
 		}
+		// Filter out east west gateway services
+		if s.LabelSelector.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayEastWestControllerLabel {
+			return nil
+		}
+
 		waypoint := s.Service.Waypoint
 		if waypoint == nil {
 			return nil
@@ -265,9 +272,13 @@ func New(options Options) Index {
 			Hostname:  waypointAddress.Hostname,
 		}}
 	})
-	ServiceInfosByOwningWaypointIP := krt.NewIndex(WorkloadServices, func(s model.ServiceInfo) []networkAddress {
+	ServiceInfosByOwningWaypointIP := krt.NewIndex(WorkloadServices, "owningWaypointIp", func(s model.ServiceInfo) []networkAddress {
 		// Filter out waypoint services
 		if s.LabelSelector.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayMeshControllerLabel {
+			return nil
+		}
+		// Filter out east west gateway services
+		if s.LabelSelector.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayEastWestControllerLabel {
 			return nil
 		}
 		waypoint := s.Service.Waypoint
@@ -317,13 +328,17 @@ func New(options Options) Index {
 		opts,
 	)
 
-	WorkloadAddressIndex := krt.NewIndex[networkAddress, model.WorkloadInfo](Workloads, networkAddressFromWorkload)
-	WorkloadServiceIndex := krt.NewIndex[string, model.WorkloadInfo](Workloads, func(o model.WorkloadInfo) []string {
+	WorkloadAddressIndex := krt.NewIndex[networkAddress, model.WorkloadInfo](Workloads, "networkAddress", networkAddressFromWorkload)
+	WorkloadServiceIndex := krt.NewIndex[string, model.WorkloadInfo](Workloads, "service", func(o model.WorkloadInfo) []string {
 		return maps.Keys(o.Workload.Services)
 	})
-	WorkloadWaypointIndexHostname := krt.NewIndex(Workloads, func(w model.WorkloadInfo) []NamespaceHostname {
+	WorkloadWaypointIndexHostname := krt.NewIndex(Workloads, "namespaceHostname", func(w model.WorkloadInfo) []NamespaceHostname {
 		// Filter out waypoints.
 		if w.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayMeshControllerLabel {
+			return nil
+		}
+		// Filter out east west gateways
+		if w.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayEastWestControllerLabel {
 			return nil
 		}
 		waypoint := w.Workload.Waypoint
@@ -340,9 +355,13 @@ func New(options Options) Index {
 			Hostname:  waypointAddress.Hostname,
 		}}
 	})
-	WorkloadWaypointIndexIP := krt.NewIndex(Workloads, func(w model.WorkloadInfo) []networkAddress {
+	WorkloadWaypointIndexIP := krt.NewIndex(Workloads, "waypointIp", func(w model.WorkloadInfo) []networkAddress {
 		// Filter out waypoints.
 		if w.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayMeshControllerLabel {
+			return nil
+		}
+		// Filter out east west gateways
+		if w.Labels[label.GatewayManaged.Name] == constants.ManagedGatewayEastWestControllerLabel {
 			return nil
 		}
 		waypoint := w.Workload.Waypoint
@@ -396,6 +415,7 @@ func New(options Options) Index {
 		ByOwningWaypointHostname: ServiceInfosByOwningWaypointHostname,
 		ByOwningWaypointIP:       ServiceInfosByOwningWaypointIP,
 	}
+
 	a.waypoints = waypointsCollection{
 		Collection: Waypoints,
 	}
@@ -664,8 +684,8 @@ type (
 	LookupNetworkGateways func() []model.NetworkGateway
 )
 
-func PushXds[T any](xds model.XDSUpdater, f func(T) model.ConfigKey) func(events []krt.Event[T], initialSync bool) {
-	return func(events []krt.Event[T], initialSync bool) {
+func PushXds[T any](xds model.XDSUpdater, f func(T) model.ConfigKey) func(events []krt.Event[T]) {
+	return func(events []krt.Event[T]) {
 		cu := sets.New[model.ConfigKey]()
 		for _, e := range events {
 			for _, i := range e.Items() {
@@ -686,8 +706,8 @@ func PushXds[T any](xds model.XDSUpdater, f func(T) model.ConfigKey) func(events
 	}
 }
 
-func PushXdsAddress[T any](xds model.XDSUpdater, f func(T) string) func(events []krt.Event[T], initialSync bool) {
-	return func(events []krt.Event[T], initialSync bool) {
+func PushXdsAddress[T any](xds model.XDSUpdater, f func(T) string) func(events []krt.Event[T]) {
+	return func(events []krt.Event[T]) {
 		au := sets.New[string]()
 		for _, e := range events {
 			for _, i := range e.Items() {

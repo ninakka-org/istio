@@ -53,15 +53,16 @@ func And(checkers ...echo.Checker) echo.Checker {
 }
 
 // Or is an aggregate Checker that requires at least one Checker succeeds.
+// Note: the checkers must succeed for all requests; there is no per-request Or().
 func Or(checkers ...echo.Checker) echo.Checker {
 	return func(result echo.CallResult, err error) error {
 		out := istiomultierror.New()
-		for _, c := range checkers {
+		for idx, c := range checkers {
 			err := c(result, err)
 			if err == nil {
 				return nil
 			}
-			out = multierror.Append(out, err)
+			out = multierror.Append(out, fmt.Errorf("failed Or() index %d: %v", idx, err))
 		}
 		return out.ErrorOrNil()
 	}
@@ -261,6 +262,15 @@ func Alpn(expected string) echo.Checker {
 	return Each(func(r echoClient.Response) error {
 		if r.Alpn != expected {
 			return fmt.Errorf("expected alpn %s, received %s", expected, r.Alpn)
+		}
+		return nil
+	})
+}
+
+func SNI(expected string) echo.Checker {
+	return Each(func(r echoClient.Response) error {
+		if r.SNI != expected {
+			return fmt.Errorf("expected SNI %s, received %s", expected, r.SNI)
 		}
 		return nil
 	})

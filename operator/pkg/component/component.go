@@ -73,6 +73,15 @@ func (c Component) Get(merged values.Map) ([]apis.GatewayComponentSpec, error) {
 		if spec.Namespace == "" {
 			spec.Namespace = "istio-system"
 		}
+
+		// We might copy this later by serializing and then deserializing from JSON.
+		// However, `nil` Go maps get serialized to JSON `null` and desrialized to untyped `nil`.
+		// When Helm tries to index from an untyped nil, it throws an error instead of returning
+		// an empty value. We avoid this issue by explicitly initializing the Go map, so it gets serialized
+		// into an empty JSON object `{}`.
+		if spec.Label == nil {
+			spec.Label = make(map[string]string)
+		}
 		spec.Raw = m
 		return spec, nil
 	}
@@ -125,9 +134,6 @@ const (
 
 	CNIComponentName     Name = "Cni"
 	ZtunnelComponentName Name = "Ztunnel"
-
-	// Deprecated: istiod remote component
-	IstiodRemoteComponentName Name = "IstiodRemote"
 
 	IngressComponentName Name = "IngressGateways"
 	EgressComponentName  Name = "EgressGateways"
@@ -187,13 +193,6 @@ var AllComponents = []Component{
 		ReleaseName:          "cni",
 	},
 	{
-		UserFacingName:       IstiodRemoteComponentName,
-		SpecName:             "istiodRemote",
-		HelmSubdir:           "istiod-remote",
-		ToHelmValuesTreeRoot: "global",
-		ReleaseName:          "istiod-remote",
-	},
-	{
 		UserFacingName:       ZtunnelComponentName,
 		SpecName:             "ztunnel",
 		ResourceType:         "DaemonSet",
@@ -208,13 +207,12 @@ var AllComponents = []Component{
 
 var (
 	userFacingComponentNames = map[Name]string{
-		BaseComponentName:         "Istio core",
-		PilotComponentName:        "Istiod",
-		CNIComponentName:          "CNI",
-		ZtunnelComponentName:      "Ztunnel",
-		IngressComponentName:      "Ingress gateways",
-		EgressComponentName:       "Egress gateways",
-		IstiodRemoteComponentName: "Istiod remote",
+		BaseComponentName:    "Istio core",
+		PilotComponentName:   "Istiod",
+		CNIComponentName:     "CNI",
+		ZtunnelComponentName: "Ztunnel",
+		IngressComponentName: "Ingress gateways",
+		EgressComponentName:  "Egress gateways",
 	}
 
 	Icons = map[Name]string{

@@ -107,18 +107,27 @@ func (cfg Config) toTemplateParams() (map[string]any, error) {
 	if metadataDiscovery != nil && *metadataDiscovery {
 		mDiscovery = true
 	}
+	if mDiscovery && xdsType == "GRPC" {
+		log.Warnf("disabling metadata discovery; not supported on SotW XDS")
+		// Not supported on legacy SotW protocol
+		mDiscovery = false
+	}
+	customSDSPath := ""
+	if _, f := cfg.RawMetadata[security.CredentialFileMetaDataName]; f {
+		customSDSPath = security.FileCredentialNameSocketPath
+	}
 	opts = append(opts,
 		option.NodeID(cfg.ID),
 		option.NodeType(cfg.ID),
 		option.PilotSubjectAltName(cfg.Metadata.PilotSubjectAltName),
 		option.OutlierLogPath(cfg.Metadata.OutlierLogPath),
+		option.CustomFileSDSPath(customSDSPath),
 		option.ApplicationLogJSON(cfg.LogAsJSON),
 		option.DiscoveryHost(discHost),
 		option.Metadata(cfg.Metadata),
 		option.XdsType(xdsType),
 		option.MetadataDiscovery(mDiscovery),
 		option.MetricsLocalhostAccessOnly(cfg.Metadata.ProxyConfig.ProxyMetadata),
-		option.DeferredClusterCreation(features.EnableDeferredClusterCreation),
 		option.DeferredStatsCreation(features.EnableDeferredStatsCreation),
 		option.BypassOverloadManagerForStaticListeners(features.BypassOverloadManagerForStaticListeners),
 	)
@@ -297,8 +306,8 @@ func getStatsOptions(meta *model.BootstrapNodeMetadata) []option.Instance {
 	}
 
 	var compression string
-	// TODO: move annotation to api repo
-	if statsCompression, ok := meta.Annotations["sidecar.istio.io/statsCompression"]; ok && envoyWellKnownCompressorLibrary.Contains(statsCompression) {
+	if statsCompression, ok := meta.Annotations[annotation.SidecarStatsCompression.Name]; ok &&
+		envoyWellKnownCompressorLibrary.Contains(statsCompression) {
 		compression = statsCompression
 	}
 
@@ -311,7 +320,6 @@ func getStatsOptions(meta *model.BootstrapNodeMetadata) []option.Instance {
 		option.EnvoyExtraStatTags(extraStatTags),
 		option.EnvoyHistogramBuckets(buckets),
 		option.EnvoyStatsCompression(compression),
-		option.DelimitedStatsTagsEnabled(features.EnableDelimitedStatsTagRegex),
 	}
 }
 
@@ -574,6 +582,7 @@ type MetadataOptions struct {
 	ProxyConfig                 *meshAPI.ProxyConfig
 	PilotSubjectAltName         []string
 	CredentialSocketExists      bool
+	CustomCredentialsFileExists bool
 	XDSRootCert                 string
 	OutlierLogPath              string
 	annotationFilePath          string
@@ -713,6 +722,9 @@ func GetNodeMetaData(options MetadataOptions) (*model.Node, error) {
 	meta.OutlierLogPath = options.OutlierLogPath
 	if options.CredentialSocketExists {
 		untypedMeta[security.CredentialMetaDataName] = "true"
+	}
+	if options.CustomCredentialsFileExists {
+		untypedMeta[security.CredentialFileMetaDataName] = "true"
 	}
 
 	if meta.MetadataDiscovery == nil {

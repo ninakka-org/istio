@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"strconv"
 
+	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -174,12 +175,15 @@ func (a *index) workloadEntryWorkloadBuilder(
 			TrustDomain:           pickTrustDomain(meshCfg),
 			Locality:              getWorkloadEntryLocality(&wle.Spec),
 		}
+		if wle.Spec.Weight > 0 {
+			w.Capacity = wrappers.UInt32(wle.Spec.Weight)
+		}
 
 		if addr, err := netip.ParseAddr(wle.Spec.Address); err == nil {
 			w.Addresses = [][]byte{addr.AsSlice()}
-		} else if wle.Spec.Address != "" {
-			log.Warnf("skipping workload entry %s/%s; DNS Address resolution is not yet implemented", wle.Namespace, wle.Name)
-		} // Else it is an empty address with network set, this is ok
+		} else {
+			w.Hostname = wle.Spec.Address
+		}
 
 		w.WorkloadName = kubelabels.WorkloadNameFromWorkloadEntry(wle.Name, wle.Annotations, wle.Labels)
 		w.WorkloadType = workloadapi.WorkloadType_POD // XXX(shashankram): HACK to impersonate pod
@@ -488,6 +492,9 @@ func (a *index) serviceEntryWorkloadBuilder(
 				ApplicationTunnel:     appTunnel,
 				TrustDomain:           pickTrustDomain(meshCfg),
 				Locality:              getWorkloadEntryLocality(wle),
+			}
+			if wle.Weight > 0 {
+				w.Capacity = wrappers.UInt32(wle.Weight)
 			}
 
 			if addr, err := netip.ParseAddr(wle.Address); err == nil {
@@ -905,7 +912,7 @@ func (t TargetRef) String() string {
 
 // endpointSliceAddressIndex builds an index from IP Address
 func endpointSliceAddressIndex(EndpointSlices krt.Collection[*discovery.EndpointSlice]) krt.Index[TargetRef, *discovery.EndpointSlice] {
-	return krt.NewIndex(EndpointSlices, func(es *discovery.EndpointSlice) []TargetRef {
+	return krt.NewIndex(EndpointSlices, "targetRef", func(es *discovery.EndpointSlice) []TargetRef {
 		if es.AddressType == discovery.AddressTypeFQDN {
 			// Currently we do not support FQDN.
 			return nil

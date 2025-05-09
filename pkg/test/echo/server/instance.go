@@ -165,7 +165,7 @@ func getBindAddresses(ip []string) []string {
 		}
 	}
 	addrs := []string{}
-	if v4 {
+	if v4 || !v6 {
 		if localhost {
 			addrs = append(addrs, "127.0.0.1")
 		} else {
@@ -286,6 +286,7 @@ func (s *Instance) validate() error {
 		case protocol.HTTP2:
 		case protocol.GRPC:
 		case protocol.HBONE:
+		case protocol.DoubleHBONE:
 		default:
 			return fmt.Errorf("protocol %v not currently supported", port.Protocol)
 		}

@@ -29,8 +29,8 @@ import (
 
 // registerHandlerAsBatched is a helper to register the provided handler as a batched handler. This allows collections to
 // only implement RegisterBatch.
-func registerHandlerAsBatched[T any](c internalCollection[T], f func(o Event[T])) Syncer {
-	return c.RegisterBatch(func(events []Event[T], initialSync bool) {
+func registerHandlerAsBatched[T any](c internalCollection[T], f func(o Event[T])) HandlerRegistration {
+	return c.RegisterBatch(func(events []Event[T]) {
 		for _, o := range events {
 			f(o)
 		}
@@ -53,6 +53,11 @@ func castEvent[I, O any](o Event[I]) Event[O] {
 	return e
 }
 
+func GetStop(opts ...CollectionOption) <-chan struct{} {
+	o := buildCollectionOptions(opts...)
+	return o.stop
+}
+
 func buildCollectionOptions(opts ...CollectionOption) collectionOptions {
 	c := &collectionOptions{}
 	for _, o := range opts {
@@ -71,11 +76,15 @@ type collectionOptions struct {
 	stop          <-chan struct{}
 	debugger      *DebugHandler
 	joinUnchecked bool
+
+	indexCollectionFromString func(string) any
+	metadata                  Metadata
 }
 
 type indexedDependency struct {
 	id  collectionUID
 	key string
+	typ indexedDependencyType
 }
 
 // dependency is a specific thing that can be depended on
@@ -86,7 +95,7 @@ type dependency struct {
 	filter *filter
 }
 
-type erasedEventHandler = func(o []Event[any], initialSync bool)
+type erasedEventHandler = func(o []Event[any])
 
 // registerDependency is an internal interface for things that can register dependencies.
 // This is called from Fetch to Collections, generally.
@@ -153,13 +162,17 @@ func getLabelSelector(a any) map[string]string {
 
 // equal checks if two objects are equal. This is done through a variety of different methods, depending on the input type.
 func equal[O any](a, b O) bool {
-	ak, ok := any(a).(Equaler[O])
-	if ok {
+	if ak, ok := any(a).(Equaler[O]); ok {
 		return ak.Equals(b)
 	}
-	pk, ok := any(&a).(Equaler[O])
-	if ok {
+	if ak, ok := any(a).(Equaler[*O]); ok {
+		return ak.Equals(&b)
+	}
+	if pk, ok := any(&a).(Equaler[O]); ok {
 		return pk.Equals(b)
+	}
+	if pk, ok := any(&a).(Equaler[*O]); ok {
+		return pk.Equals(&b)
 	}
 	// Future improvement: add a default Kubernetes object implementation
 	// ResourceVersion is tempting but probably not safe. If we are comparing objects from the API server its fine,

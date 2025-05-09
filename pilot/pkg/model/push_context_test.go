@@ -75,14 +75,14 @@ func TestMergeUpdateRequest(t *testing.T) {
 		{
 			"left nil",
 			nil,
-			&PushRequest{Full: true},
-			PushRequest{Full: true},
+			&PushRequest{Full: true, Forced: true},
+			PushRequest{Full: true, Forced: true},
 		},
 		{
 			"right nil",
-			&PushRequest{Full: true},
+			&PushRequest{Full: true, Forced: true},
 			nil,
-			PushRequest{Full: true},
+			PushRequest{Full: true, Forced: true},
 		},
 		{
 			"simple merge",
@@ -94,6 +94,7 @@ func TestMergeUpdateRequest(t *testing.T) {
 					{Kind: kind.Kind(1), Namespace: "ns1"}: {},
 				},
 				Reason: NewReasonStats(ServiceUpdate, ServiceUpdate),
+				Forced: true,
 			},
 			&PushRequest{
 				Full:  false,
@@ -103,6 +104,7 @@ func TestMergeUpdateRequest(t *testing.T) {
 					{Kind: kind.Kind(2), Namespace: "ns2"}: {},
 				},
 				Reason: NewReasonStats(EndpointUpdate),
+				Forced: false,
 			},
 			PushRequest{
 				Full:  true,
@@ -113,15 +115,18 @@ func TestMergeUpdateRequest(t *testing.T) {
 					{Kind: kind.Kind(2), Namespace: "ns2"}: {},
 				},
 				Reason: NewReasonStats(ServiceUpdate, ServiceUpdate, EndpointUpdate),
+				Forced: true,
 			},
 		},
 		{
 			"skip config type merge: one empty",
-			&PushRequest{Full: true, ConfigsUpdated: nil},
+			&PushRequest{Full: true, ConfigsUpdated: nil, Forced: true},
 			&PushRequest{Full: true, ConfigsUpdated: sets.Set[ConfigKey]{{
 				Kind: kind.Kind(2),
 			}: {}}},
-			PushRequest{Full: true, ConfigsUpdated: nil, Reason: nil},
+			PushRequest{Full: true, ConfigsUpdated: sets.Set[ConfigKey]{{
+				Kind: kind.Kind(2),
+			}: {}}, Reason: nil, Forced: true},
 		},
 	}
 
@@ -3280,8 +3285,17 @@ func TestGetHostsFromMeshConfig(t *testing.T) {
 			},
 		},
 	}
+	ef := config.Config{
+		Meta: config.Meta{
+			GroupVersionKind: gvk.EnvoyFilter,
+			Annotations:      map[string]string{"envoyfilter.istio.io/referenced-services": "envoyfilter.example.com"},
+			Name:             "ef",
+			Namespace:        "istio-system",
+		},
+		Spec: &networking.EnvoyFilter{},
+	}
 
-	for _, c := range []config.Config{vs1, vs2} {
+	for _, c := range []config.Config{vs1, vs2, ef} {
 		if _, err := configStore.Create(c); err != nil {
 			t.Fatalf("could not create %v", c.Name)
 		}
@@ -3306,18 +3320,24 @@ func TestGetHostsFromMeshConfig(t *testing.T) {
 				Hostname:   "otel-wrong.example.com",
 				Attributes: ServiceAttributes{Namespace: "some-ns"},
 			},
+			{
+				Hostname:   "envoyfilter.example.com",
+				Attributes: ServiceAttributes{Namespace: "some-ns"},
+			},
 		},
 	}
 	ps.initDefaultExportMaps()
+	ps.initEnvoyFilters(env, nil, nil)
 	ps.initServiceRegistry(env, nil)
 	proxy := &Proxy{Type: Router}
 	proxy.SetSidecarScope(ps)
 	proxy.SetGatewaysForProxy(ps)
-	got := sets.New(slices.Map(ps.GatewayServices(proxy), func(e *Service) string {
+	patches := ps.EnvoyFilters(proxy)
+	got := sets.New(slices.Map(ps.GatewayServices(proxy, patches), func(e *Service) string {
 		return e.Hostname.String()
 	})...)
 	// Should match 2 of the 3 providers; one has a mismatched namespace though
-	assert.Equal(t, got, sets.New("otel.foo.svc.cluster.local", "otel.example.com"))
+	assert.Equal(t, got, sets.New("otel.foo.svc.cluster.local", "otel.example.com", "envoyfilter.example.com"))
 }
 
 func TestWellKnownProvidersCount(t *testing.T) {

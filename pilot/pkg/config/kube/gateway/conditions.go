@@ -20,13 +20,12 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8s "sigs.k8s.io/gateway-api/apis/v1"
+	k8sbeta "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model/kstatus"
-	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/maps"
-	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/sets"
 )
@@ -39,9 +38,11 @@ type RouteParentResult struct {
 	DeniedReason *ParentError
 	// RouteError, if present, indicates why the reference was not valid
 	RouteError *ConfigError
+	// WaypointError, if present, indicates why the reference was does not have a waypoint
+	WaypointError *WaypointError
 }
 
-func createRouteStatus(parentResults []RouteParentResult, obj config.Config, currentParents []k8s.RouteParentStatus) []k8s.RouteParentStatus {
+func createRouteStatus(parentResults []RouteParentResult, generation int64, currentParents []k8s.RouteParentStatus) []k8s.RouteParentStatus {
 	parents := make([]k8s.RouteParentStatus, 0, len(parentResults))
 	// Fill in all the gateways that are already present but not owned by us. This is non-trivial as there may be multiple
 	// gateway controllers that are exposing their status on the same route. We need to attempt to manage ours properly (including
@@ -71,52 +72,59 @@ func createRouteStatus(parentResults []RouteParentResult, obj config.Config, cur
 			seenReasons.Insert(ParentNoError)
 		}
 	}
-	reasonRanking := []ParentErrorReason{
-		// No errors is preferred
-		ParentNoError,
-		// All route level errors
-		ParentErrorNotAllowed,
-		ParentErrorNoHostname,
-		ParentErrorParentRefConflict,
-		// Failures to match the Port or SectionName. These are last so that if we bind to 1 listener we
-		// just report errors for that 1 listener instead of for all sections we didn't bind to
-		ParentErrorNotAccepted,
+
+	const (
+		rankParentNoErrors = iota
+		rankParentErrorNotAllowed
+		rankParentErrorNoHostname
+		rankParentErrorParentRefConflict
+		rankParentErrorNotAccepted
+	)
+
+	rankParentError := func(result RouteParentResult) int {
+		if result.DeniedReason == nil {
+			return rankParentNoErrors
+		}
+		switch result.DeniedReason.Reason {
+		case ParentErrorNotAllowed:
+			return rankParentErrorNotAllowed
+		case ParentErrorNoHostname:
+			return rankParentErrorNoHostname
+		case ParentErrorParentRefConflict:
+			return rankParentErrorParentRefConflict
+		case ParentErrorNotAccepted:
+			return rankParentErrorNotAccepted
+		}
+		return rankParentNoErrors
 	}
+
 	// Next we want to collapse these. We need to report 1 type of error, or none.
 	report := map[k8s.ParentReference]RouteParentResult{}
-	for _, wantReason := range reasonRanking {
-		if !seenReasons.Contains(wantReason) {
+	for ref, results := range seen {
+		if len(results) == 0 {
 			continue
 		}
-		// We found our highest priority ranking, now we need to collapse this into a single message
-		for k, refs := range seen {
-			for _, ref := range refs {
-				reason := ParentNoError
-				if ref.DeniedReason != nil {
-					reason = ref.DeniedReason.Reason
-				}
-				if wantReason != reason {
-					// Skip this one, it is for a less relevant reason
-					continue
-				}
-				exist, f := report[k]
-				if f {
-					if ref.DeniedReason != nil {
-						if exist.DeniedReason != nil {
-							// join the error
-							exist.DeniedReason.Message += "; " + ref.DeniedReason.Message
-						} else {
-							exist.DeniedReason = ref.DeniedReason
-						}
-					}
+
+		toReport := results[0]
+		mostSevereRankSeen := rankParentError(toReport)
+
+		for _, result := range results[1:] {
+			resultRank := rankParentError(result)
+			// lower number means more severe
+			if resultRank < mostSevereRankSeen {
+				mostSevereRankSeen = resultRank
+				toReport = result
+			} else if resultRank == mostSevereRankSeen {
+				// join the error messages
+				if toReport.DeniedReason == nil {
+					toReport.DeniedReason = result.DeniedReason
 				} else {
-					exist = ref
+					toReport.DeniedReason.Message += "; " + result.DeniedReason.Message
 				}
-				report[k] = exist
 			}
 		}
-		// Once we find the best reason, do not consider any others
-		break
+
+		report[ref] = toReport
 	}
 
 	// Now we fill in all the parents we do own
@@ -150,6 +158,18 @@ func createRouteStatus(parentResults []RouteParentResult, obj config.Config, cur
 			}
 		}
 
+		// when ambient is enabled, report the waypoints resolved condition
+		if features.EnableAmbient {
+			cond := &condition{
+				reason:  string(RouteReasonResolvedWaypoints),
+				message: "All waypoints resolved",
+			}
+			if gw.WaypointError != nil {
+				cond.message = gw.WaypointError.Message
+			}
+			conds[string(RouteConditionResolvedWaypoints)] = cond
+		}
+
 		var currentConditions []metav1.Condition
 		currentStatus := slices.FindFunc(currentParents, func(s k8s.RouteParentStatus) bool {
 			return parentRefString(s.ParentRef) == parentRefString(gw.OriginalReference) &&
@@ -161,7 +181,7 @@ func createRouteStatus(parentResults []RouteParentResult, obj config.Config, cur
 		parents = append(parents, k8s.RouteParentStatus{
 			ParentRef:      gw.OriginalReference,
 			ControllerName: k8s.GatewayController(features.ManagedGatewayController),
-			Conditions:     setConditions(obj.Generation, currentConditions, conds),
+			Conditions:     setConditions(generation, currentConditions, conds),
 		})
 	}
 	// Ensure output is deterministic.
@@ -205,6 +225,23 @@ const (
 	DeprecateFieldUsage  ConfigErrorReason = "DeprecatedField"
 )
 
+const (
+	// This condition indicates whether a route's parent reference has
+	// a waypoint configured by resolving the "istio.io/use-waypoint" label
+	// on either the referenced parent or the parent's namespace.
+	RouteConditionResolvedWaypoints k8s.RouteConditionType   = "ResolvedWaypoints"
+	RouteReasonResolvedWaypoints    k8s.RouteConditionReason = "ResolvedWaypoints"
+)
+
+type WaypointErrorReason string
+
+const (
+	WaypointErrorReasonMissingLabel     = WaypointErrorReason("MissingUseWaypointLabel")
+	WaypointErrorMsgMissingLabel        = "istio.io/use-waypoint label missing from parent and parent namespace; in ambient mode, route will not be respected"
+	WaypointErrorReasonNoMatchingParent = WaypointErrorReason("NoMatchingParent")
+	WaypointErrorMsgNoMatchingParent    = "parent not found"
+)
+
 // ParentError represents that a parent could not be referenced
 type ParentError struct {
 	Reason  ParentErrorReason
@@ -214,6 +251,11 @@ type ParentError struct {
 // ConfigError represents an invalid configuration that will be reported back to the user.
 type ConfigError struct {
 	Reason  ConfigErrorReason
+	Message string
+}
+
+type WaypointError struct {
+	Reason  WaypointErrorReason
 	Message string
 }
 
@@ -277,42 +319,27 @@ func setConditions(generation int64, existingConditions []metav1.Condition, cond
 	return existingConditions
 }
 
-func reportListenerAttachedRoutes(index int, obj config.Config, i int32) {
-	obj.Status.(*kstatus.WrappedStatus).Mutate(func(s config.Status) config.Status {
-		gs := s.(*k8s.GatewayStatus)
-		for index >= len(gs.Listeners) {
-			gs.Listeners = append(gs.Listeners, k8s.ListenerStatus{})
+func reportListenerCondition(index int, l k8s.Listener, obj *k8sbeta.Gateway,
+	gs *k8sbeta.GatewayStatus, conditions map[string]*condition,
+) {
+	for index >= len(gs.Listeners) {
+		gs.Listeners = append(gs.Listeners, k8s.ListenerStatus{})
+	}
+	cond := gs.Listeners[index].Conditions
+	supported, valid := generateSupportedKinds(l)
+	if !valid {
+		conditions[string(k8s.ListenerConditionResolvedRefs)] = &condition{
+			reason:  string(k8s.ListenerReasonInvalidRouteKinds),
+			status:  metav1.ConditionFalse,
+			message: "Invalid route kinds",
 		}
-		status := gs.Listeners[index]
-		status.AttachedRoutes = i
-		gs.Listeners[index] = status
-		return gs
-	})
-}
-
-func reportListenerCondition(index int, l k8s.Listener, obj config.Config, conditions map[string]*condition) {
-	obj.Status.(*kstatus.WrappedStatus).Mutate(func(s config.Status) config.Status {
-		gs := s.(*k8s.GatewayStatus)
-		for index >= len(gs.Listeners) {
-			gs.Listeners = append(gs.Listeners, k8s.ListenerStatus{})
-		}
-		cond := gs.Listeners[index].Conditions
-		supported, valid := generateSupportedKinds(l)
-		if !valid {
-			conditions[string(k8s.ListenerConditionResolvedRefs)] = &condition{
-				reason:  string(k8s.ListenerReasonInvalidRouteKinds),
-				status:  metav1.ConditionFalse,
-				message: "Invalid route kinds",
-			}
-		}
-		gs.Listeners[index] = k8s.ListenerStatus{
-			Name:           l.Name,
-			AttachedRoutes: 0, // this will be reported later
-			SupportedKinds: supported,
-			Conditions:     setConditions(obj.Generation, cond, conditions),
-		}
-		return gs
-	})
+	}
+	gs.Listeners[index] = k8s.ListenerStatus{
+		Name:           l.Name,
+		AttachedRoutes: 0, // this will be reported later
+		SupportedKinds: supported,
+		Conditions:     setConditions(obj.Generation, cond, conditions),
+	}
 }
 
 func generateSupportedKinds(l k8s.Listener) ([]k8s.RouteGroupKind, bool) {
@@ -321,16 +348,16 @@ func generateSupportedKinds(l k8s.Listener) ([]k8s.RouteGroupKind, bool) {
 	case k8s.HTTPProtocolType, k8s.HTTPSProtocolType:
 		// Only terminate allowed, so its always HTTP
 		supported = []k8s.RouteGroupKind{
-			{Group: (*k8s.Group)(ptr.Of(gvk.HTTPRoute.Group)), Kind: k8s.Kind(gvk.HTTPRoute.Kind)},
-			{Group: (*k8s.Group)(ptr.Of(gvk.GRPCRoute.Group)), Kind: k8s.Kind(gvk.GRPCRoute.Kind)},
+			toRouteKind(gvk.HTTPRoute),
+			toRouteKind(gvk.GRPCRoute),
 		}
 	case k8s.TCPProtocolType:
-		supported = []k8s.RouteGroupKind{{Group: (*k8s.Group)(ptr.Of(gvk.TCPRoute.Group)), Kind: k8s.Kind(gvk.TCPRoute.Kind)}}
+		supported = []k8s.RouteGroupKind{toRouteKind(gvk.TCPRoute)}
 	case k8s.TLSProtocolType:
 		if l.TLS != nil && l.TLS.Mode != nil && *l.TLS.Mode == k8s.TLSModePassthrough {
-			supported = []k8s.RouteGroupKind{{Group: (*k8s.Group)(ptr.Of(gvk.TLSRoute.Group)), Kind: k8s.Kind(gvk.TLSRoute.Kind)}}
+			supported = []k8s.RouteGroupKind{toRouteKind(gvk.TLSRoute)}
 		} else {
-			supported = []k8s.RouteGroupKind{{Group: (*k8s.Group)(ptr.Of(gvk.TCPRoute.Group)), Kind: k8s.Kind(gvk.TCPRoute.Kind)}}
+			supported = []k8s.RouteGroupKind{toRouteKind(gvk.TCPRoute)}
 		}
 		// UDP route not support
 	}
@@ -348,13 +375,4 @@ func generateSupportedKinds(l k8s.Listener) ([]k8s.RouteGroupKind, bool) {
 		return intersection, len(intersection) == len(l.AllowedRoutes.Kinds)
 	}
 	return supported, true
-}
-
-// This and the following function really belongs in some gateway-api lib
-func routeGroupKindEqual(rgk1, rgk2 k8s.RouteGroupKind) bool {
-	return rgk1.Kind == rgk2.Kind && getGroup(rgk1) == getGroup(rgk2)
-}
-
-func getGroup(rgk k8s.RouteGroupKind) k8s.Group {
-	return ptr.OrDefault(rgk.Group, k8s.Group(gvk.KubernetesGateway.Group))
 }

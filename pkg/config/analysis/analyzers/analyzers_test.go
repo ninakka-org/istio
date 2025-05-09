@@ -1000,6 +1000,23 @@ var testGrid = []testCase{
 			{msg.NegativeConditionStatus, "Gateway default/negative-condition-gateway"},
 			{msg.NegativeConditionStatus, "HTTPRoute default/negative-condition-httproute"},
 			{msg.NegativeConditionStatus, "GRPCRoute default/negative-condition-grpcroute"},
+			{msg.NegativeConditionStatus, "AuthorizationPolicy default/negative-condition-authz-partially-invalid"},
+		},
+	},
+	{
+		name:       "DestinationRuleWithFakeHost",
+		inputFiles: []string{"testdata/destinationrule-with-fake-host.yaml"},
+		analyzer:   &destinationrule.PodNotSelectedAnalyzer{},
+		expected: []message{
+			{msg.UnknownDestinationRuleHost, "DestinationRule default/fake-host"},
+		},
+	},
+	{
+		name:       "DestinationRuleSubsetsNotSelectPods",
+		inputFiles: []string{"testdata/destinationrule-subsets-not-select-pods.yaml"},
+		analyzer:   &destinationrule.PodNotSelectedAnalyzer{},
+		expected: []message{
+			{msg.DestinationRuleSubsetNotSelectPods, "DestinationRule default/subsets-not-select-pods"},
 		},
 	},
 }

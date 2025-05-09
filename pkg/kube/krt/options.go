@@ -17,20 +17,28 @@ package krt
 // OptionsBuilder is a small wrapper around KRT options to make it easy to provide a common set of options to all collections
 // without excessive duplication.
 type OptionsBuilder struct {
-	stop     chan struct{}
-	debugger *DebugHandler
+	// namePrefix, if set, will prefix every name with the common prefix.
+	// For example `<namePrefix>/<name>`.
+	namePrefix string
+	stop       <-chan struct{}
+	debugger   *DebugHandler
 }
 
-func NewOptionsBuilder(stop chan struct{}, debugger *DebugHandler) OptionsBuilder {
+func NewOptionsBuilder(stop <-chan struct{}, namePrefix string, debugger *DebugHandler) OptionsBuilder {
 	return OptionsBuilder{
-		stop:     stop,
-		debugger: debugger,
+		namePrefix: namePrefix,
+		stop:       stop,
+		debugger:   debugger,
 	}
 }
 
 // WithName applies the base options with a specific name
 func (k OptionsBuilder) WithName(n string) []CollectionOption {
-	return []CollectionOption{WithDebugging(k.debugger), WithStop(k.stop), WithName(n)}
+	name := n
+	if k.namePrefix != "" {
+		name = k.namePrefix + "/" + name
+	}
+	return []CollectionOption{WithDebugging(k.debugger), WithStop(k.stop), WithName(name)}
 }
 
 // With applies arbitrary options along with the base options.
@@ -80,5 +88,22 @@ func WithStop(stop <-chan struct{}) CollectionOption {
 func WithDebugging(handler *DebugHandler) CollectionOption {
 	return func(c *collectionOptions) {
 		c.debugger = handler
+	}
+}
+
+// WithJoinUnchecked enables an optimization for join collections, where keys are not deduplicated across collections.
+// This option can only be used when joined collections are disjoint: keys overlapping between collections is undefined behavior
+func WithJoinUnchecked() CollectionOption {
+	return func(c *collectionOptions) {
+		c.joinUnchecked = true
+	}
+}
+
+// WithMetadata adds metadata to the collection. This is mainly useful
+// for creating collections of collections where the metadata is needed to
+// fetch a specific collection.
+func WithMetadata(metadata Metadata) CollectionOption {
+	return func(c *collectionOptions) {
+		c.metadata = metadata
 	}
 }

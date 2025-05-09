@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeVersion "k8s.io/apimachinery/pkg/version"
@@ -65,7 +66,9 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayapialpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 	gatewayapibeta "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewayx "sigs.k8s.io/gateway-api/apisx/v1alpha1"
 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayapifake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 
@@ -242,11 +245,19 @@ func setupFakeClient[T fakeClient](fc T, group string, objects []runtime.Object)
 	tracker := fc.Tracker()
 	// We got a set of objects... but which client do they apply to? Filter based on the group
 	filterGroup := func(object runtime.Object) bool {
-		g := object.GetObjectKind().GroupVersionKind().Group
+		gk := object.GetObjectKind().GroupVersionKind()
+		g := gk.Group
+		if gk.Kind == "" {
+			gvks, _, _ := IstioScheme.ObjectKinds(object)
+			g = config.FromKubernetesGVK(gvks[0]).Group
+		}
 		if strings.Contains(g, "istio.io") {
 			return group == "istio"
 		}
 		if strings.Contains(g, "gateway.networking.k8s.io") {
+			return group == "gateway"
+		}
+		if strings.Contains(g, "gateway.networking.x-k8s.io") {
 			return group == "gateway"
 		}
 		return group == "kube"
@@ -468,14 +479,21 @@ func newClientInternal(clientFactory *clientFactory, opts ...ClientOption) (*cli
 		return nil, err
 	}
 
-	c.http = &http.Client{
-		Timeout: time.Second * 15,
+	c.http = &http.Client{}
+	if c.config != nil && c.config.Timeout != 0 {
+		c.http.Timeout = c.config.Timeout
+	} else {
+		c.http.Timeout = time.Second * 15
 	}
+
 	var clientWithTimeout kubernetes.Interface
 	clientWithTimeout = c.kube
 	restConfig := c.RESTConfig()
 	if restConfig != nil {
-		restConfig.Timeout = time.Second * 5
+		if restConfig.Timeout == 0 {
+			restConfig.Timeout = time.Second * 5
+		}
+
 		kubeClient, err := kubernetes.NewForConfig(restConfig)
 		if err == nil {
 			clientWithTimeout = kubeClient
@@ -530,6 +548,20 @@ func WithRevision(revision string) ClientOption {
 	return func(c CLIClient) CLIClient {
 		client := c.(*client)
 		client.revision = revision
+		return client
+	}
+}
+
+// WithTimeout sets the timeout for the client.
+func WithTimeout(timeout time.Duration) ClientOption {
+	return func(c CLIClient) CLIClient {
+		client := c.(*client)
+		if client.config == nil {
+			client.config = &rest.Config{}
+		}
+
+		client.config.Timeout = timeout
+
 		return client
 	}
 }
@@ -768,6 +800,21 @@ func (c *client) PodExecCommands(podName, podNamespace, container string, comman
 	exec, err := remotecommand.NewSPDYExecutorForTransports(wrapper, upgrader, "POST", req.URL())
 	if err != nil {
 		return "", "", err
+	}
+
+	// Fallback executor is default, unless feature flag is explicitly disabled.
+	if !remoteCommandWebsockets.IsDisabled() {
+		// WebSocketExecutor must be "GET" method as described in RFC 6455 Sec. 4.1 (page 17).
+		websocketExec, err := remotecommand.NewWebSocketExecutor(c.config, "GET", req.URL().String())
+		if err != nil {
+			return "", "", err
+		}
+		exec, err = remotecommand.NewFallbackExecutor(websocketExec, exec, func(err error) bool {
+			return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+		})
+		if err != nil {
+			return "", "", err
+		}
 	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -1313,8 +1360,10 @@ func istioScheme() *runtime.Scheme {
 	utilruntime.Must(clienttelemetryalpha.AddToScheme(scheme))
 	utilruntime.Must(clientextensions.AddToScheme(scheme))
 	utilruntime.Must(gatewayapi.Install(scheme))
+	utilruntime.Must(gatewayapialpha3.Install(scheme))
 	utilruntime.Must(gatewayapibeta.Install(scheme))
 	utilruntime.Must(gatewayapiv1.Install(scheme))
+	utilruntime.Must(gatewayx.Install(scheme))
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	return scheme
 }

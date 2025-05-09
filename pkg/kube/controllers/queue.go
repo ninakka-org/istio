@@ -90,7 +90,15 @@ func NewQueue(name string, options ...func(*Queue)) Queue {
 		o(&q)
 	}
 	if q.queue == nil {
-		q.queue = workqueue.NewTypedRateLimitingQueue[any](workqueue.DefaultTypedControllerRateLimiter[any]())
+		q.queue = workqueue.NewTypedRateLimitingQueueWithConfig[any](
+			workqueue.DefaultTypedControllerRateLimiter[any](),
+			workqueue.TypedRateLimitingQueueConfig[any]{
+				Name:            name,
+				MetricsProvider: nil,
+				Clock:           nil,
+				DelayingQueue:   nil,
+			},
+		)
 	}
 	q.log = log.WithLabels("controller", q.name)
 	return q
@@ -104,6 +112,13 @@ func (q Queue) Add(item any) {
 // AddObject takes an Object and adds the types.NamespacedName associated.
 func (q Queue) AddObject(obj Object) {
 	q.queue.Add(config.NamespacedName(obj))
+}
+
+// ShutDownEarly shuts down the queue *before* it has been Run.
+// Creating a queue without running it causes a leak, so this must be called on any queue that is closed without
+func (q Queue) ShutDownEarly() {
+	q.log.Infof("shutdown early")
+	q.queue.ShutDown()
 }
 
 // Run the queue. This is synchronous, so should typically be called in a goroutine.

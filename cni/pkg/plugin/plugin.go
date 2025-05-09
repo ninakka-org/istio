@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -62,10 +63,12 @@ type Config struct {
 	types.NetConf
 
 	// Add plugin-specific flags here
-	PluginLogLevel    string   `json:"plugin_log_level"`
-	CNIAgentRunDir    string   `json:"cni_agent_run_dir"`
-	AmbientEnabled    bool     `json:"ambient_enabled"`
-	ExcludeNamespaces []string `json:"exclude_namespaces"`
+	PluginLogLevel      string                    `json:"plugin_log_level"`
+	CNIAgentRunDir      string                    `json:"cni_agent_run_dir"`
+	AmbientEnabled      bool                      `json:"ambient_enabled"`
+	EnablementSelectors []util.EnablementSelector `json:"enablement_selectors"`
+	ExcludeNamespaces   []string                  `json:"exclude_namespaces"`
+	PodNamespace        string                    `json:"pod_namespace"`
 }
 
 // K8sArgs is the valid CNI_ARGS used for Kubernetes
@@ -109,17 +112,24 @@ func parseConfig(stdin []byte) (*Config, error) {
 	return &conf, nil
 }
 
+// Logging with CNI plugins is special - we *cannot* log to stdout, as the CNI spec uses stdin/stdout to pass context between invoked plugins.
+// So, we log to a rolling logfile, and also forward logs via UDS to the node agent (if available)
 func GetLoggingOptions(cfg *Config) *log.Options {
 	loggingOptions := log.DefaultOptions()
 	loggingOptions.OutputPaths = []string{"stderr"}
 	loggingOptions.JSONEncoding = true
 	if cfg != nil {
+
 		udsAddr := filepath.Join(cfg.CNIAgentRunDir, constants.LogUDSSocketName)
 		// Tee all logs to UDS. Stdout will go to kubelet (hard to access, UDS will be read by the CNI DaemonSet and exposed
 		// by normal `kubectl logs`
 		if file.Exists(udsAddr) {
 			loggingOptions.WithTeeToUDS(udsAddr, constants.UDSLogPath)
 		}
+
+		// Also tee to a rolling log on the node's local filesystem, in case the UDS server is down.
+		loggingOptions.WithTeeToRollingLocal(filepath.Join(cfg.CNIAgentRunDir, constants.LocalRollingLogName), constants.RollingLogMaxSizeMB)
+
 		// Override plugin log level based on their config. Not we use "all" (OverrideScopeName) since there is no scoping in the plugin.
 		if cfg.PluginLogLevel != "" {
 			loggingOptions.SetDefaultOutputLevel(log.OverrideScopeName, log.StringToLevel(cfg.PluginLogLevel))
@@ -206,7 +216,7 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 	// For ambient pods, this is all the logic we need to run
 	if conf.AmbientEnabled {
 		log.Debugf("istio-cni ambient cmdAdd podName: %s - checking if ambient enabled", podName)
-		podIsAmbient, err := isAmbientPod(kClient, podName, podNamespace)
+		podIsAmbient, err := isAmbientPod(kClient, podName, podNamespace, conf.EnablementSelectors)
 		if err != nil {
 			log.Errorf("istio-cni cmdAdd failed to check ambient: %s", err)
 		}
@@ -222,8 +232,9 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 			cniEventAddr := filepath.Join(conf.CNIAgentRunDir, constants.CNIEventSocketName)
 			cniClient := newCNIClient(cniEventAddr, constants.CNIAddEventPath)
 			if err = PushCNIEvent(cniClient, args, prevResIps, podName, podNamespace); err != nil {
-				log.Errorf("istio-cni cmdAdd failed to signal node Istio CNI agent: %s", err)
-				return err
+				// return a more informative error in the pod event log if CNI plugin fails
+				wrapErr := fmt.Errorf("istio-cni cmdAdd failed to contact node Istio CNI agent: %s", err)
+				return wrapErr
 			}
 			return nil
 		}
@@ -231,6 +242,8 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 	}
 	// End ambient plugin logic
 
+	maybeCNIPod := string(k8sArgs.K8S_POD_NAME)
+	maybeCNINS := string(k8sArgs.K8S_POD_NAMESPACE)
 	pi := &PodInfo{}
 	var k8sErr error
 	for attempt := 1; attempt <= podRetrievalMaxRetries; attempt++ {
@@ -239,8 +252,35 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 			break
 		}
 		log.Debugf("Failed to get pod info: %v", k8sErr)
+
+		// Failsafe - if we get here, we could be in a state where
+		// 1. We are being upgraded - `istio-cni` node agent pod is gone
+		// 2. This plugin was left in place to stall pod spawns until the
+		// replacement arrives.
+		// 3. This plugin can't contact the K8S API server (creds expired/invalid)
+		// 4. The pod this plugin would be blocking by returning this error
+		// *is* our replacement `istio-cni` pod (which would refresh our creds)
+		//
+		// So, if we can't contact the K8S API server at all, fall back to checking the
+		// K8S_POD/K8S_NAMESPACE values from the CNI layer, and let this pod through
+		// if it looks like it might be our `istio-cni` node agent.
+		//
+		// We could do this check unconditionally above, but it seems smarter to only
+		// fall back to this (lightly) relaxed check when we know we are in a degraded state.
+		//
+		// Is this fail open? Not really, the K8S args come from the cluster's CNI and are as-authoritative
+		// as the hard query we would otherwise make against the API.
+		//
+		// TODO NRI could probably give us more identifying information here OOB from k8s.
+		if strings.HasPrefix(maybeCNIPod, "istio-cni-node-") &&
+			maybeCNINS == conf.PodNamespace {
+			log.Infof("in a degraded state and %v looks like our own agent pod, skipping", maybeCNIPod)
+			return nil
+		}
+
 		time.Sleep(podRetrievalInterval)
 	}
+
 	if k8sErr != nil {
 		log.Errorf("Failed to get pod info: %v", k8sErr)
 		return k8sErr
@@ -325,7 +365,12 @@ func CmdDelete(args *skel.CmdArgs) (err error) {
 	return nil
 }
 
-func isAmbientPod(client kubernetes.Interface, podName, podNamespace string) (bool, error) {
+func isAmbientPod(client kubernetes.Interface, podName, podNamespace string, selectors []util.EnablementSelector) (bool, error) {
+	compiledSelectors, err := util.NewCompiledEnablementSelectors(selectors)
+	if err != nil {
+		return false, fmt.Errorf("failed to instantiate ambient enablement selector: %v", err)
+	}
+
 	pod, err := client.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
@@ -335,5 +380,5 @@ func isAmbientPod(client kubernetes.Interface, podName, podNamespace string) (bo
 		return false, err
 	}
 
-	return util.PodRedirectionEnabled(ns, pod), nil
+	return compiledSelectors.Matches(pod.Labels, pod.Annotations, ns.Labels), nil
 }
