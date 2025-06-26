@@ -137,6 +137,7 @@ type Inputs struct {
 	GRPCRoutes           krt.Collection[*gatewayv1.GRPCRoute]
 	TCPRoutes            krt.Collection[*gatewayalpha.TCPRoute]
 	TLSRoutes            krt.Collection[*gatewayalpha.TLSRoute]
+	ListenerSets         krt.Collection[*gatewayx.XListenerSet]
 	ReferenceGrants      krt.Collection[*gateway.ReferenceGrant]
 	BackendTrafficPolicy krt.Collection[*gatewayx.XBackendTrafficPolicy]
 	BackendTLSPolicies   krt.Collection[*gatewayalpha3.BackendTLSPolicy]
@@ -154,7 +155,7 @@ func NewController(
 	stop := make(chan struct{})
 	opts := krt.NewOptionsBuilder(stop, "gateway", options.KrtDebugger)
 
-	tw := revisions.NewTagWatcher(kc, options.Revision)
+	tw := revisions.NewTagWatcher(kc, options.Revision, options.SystemNamespace)
 	c := &Controller{
 		client:         kc,
 		cluster:        options.ClusterID,
@@ -200,12 +201,14 @@ func NewController(
 		inputs.TLSRoutes = buildClient[*gatewayalpha.TLSRoute](c, kc, gvr.TLSRoute, opts, "informer/TLSRoutes")
 		inputs.BackendTLSPolicies = buildClient[*gatewayalpha3.BackendTLSPolicy](c, kc, gvr.BackendTLSPolicy, opts, "informer/BackendTLSPolicies")
 		inputs.BackendTrafficPolicy = buildClient[*gatewayx.XBackendTrafficPolicy](c, kc, gvr.XBackendTrafficPolicy, opts, "informer/XBackendTrafficPolicy")
+		inputs.ListenerSets = buildClient[*gatewayx.XListenerSet](c, kc, gvr.XListenerSet, opts, "informer/XListenerSet")
 	} else {
 		// If disabled, still build a collection but make it always empty
 		inputs.TCPRoutes = krt.NewStaticCollection[*gatewayalpha.TCPRoute](nil, nil, opts.WithName("disable/TCPRoutes")...)
 		inputs.TLSRoutes = krt.NewStaticCollection[*gatewayalpha.TLSRoute](nil, nil, opts.WithName("disable/TLSRoutes")...)
 		inputs.BackendTLSPolicies = krt.NewStaticCollection[*gatewayalpha3.BackendTLSPolicy](nil, nil, opts.WithName("disable/BackendTLSPolicies")...)
 		inputs.BackendTrafficPolicy = krt.NewStaticCollection[*gatewayx.XBackendTrafficPolicy](nil, nil, opts.WithName("disable/XBackendTrafficPolicy")...)
+		inputs.ListenerSets = krt.NewStaticCollection[*gatewayx.XListenerSet](nil, nil, opts.WithName("disable/XListenerSet")...)
 	}
 
 	references := NewReferenceSet(
@@ -217,9 +220,22 @@ func NewController(
 	handlers := []krt.HandlerRegistration{}
 
 	GatewayClassStatus, GatewayClasses := GatewayClassesCollection(inputs.GatewayClasses, opts)
-	status.RegisterStatus(c.status, GatewayClassStatus)
+	status.RegisterStatus(c.status, GatewayClassStatus, GetStatus)
 
 	ReferenceGrants := BuildReferenceGrants(ReferenceGrantsCollection(inputs.ReferenceGrants, opts))
+	ListenerSetStatus, ListenerSets := ListenerSetCollection(
+		inputs.ListenerSets,
+		inputs.Gateways,
+		GatewayClasses,
+		inputs.Namespaces,
+		ReferenceGrants,
+		inputs.Secrets,
+		options.DomainSuffix,
+		c.gatewayContext,
+		c.tagWatcher,
+		opts,
+	)
+	status.RegisterStatus(c.status, ListenerSetStatus, GetStatus)
 
 	DestinationRules := DestinationRuleCollection(
 		inputs.BackendTrafficPolicy,
@@ -234,6 +250,7 @@ func NewController(
 	// Do not register yet.
 	GatewaysStatus, Gateways := GatewayCollection(
 		inputs.Gateways,
+		ListenerSets,
 		GatewayClasses,
 		inputs.Namespaces,
 		ReferenceGrants,
@@ -260,25 +277,25 @@ func NewController(
 		routeInputs,
 		opts,
 	)
-	status.RegisterStatus(c.status, tcpRoutes.Status)
+	status.RegisterStatus(c.status, tcpRoutes.Status, GetStatus)
 	tlsRoutes := TLSRouteCollection(
 		inputs.TLSRoutes,
 		routeInputs,
 		opts,
 	)
-	status.RegisterStatus(c.status, tlsRoutes.Status)
+	status.RegisterStatus(c.status, tlsRoutes.Status, GetStatus)
 	httpRoutes := HTTPRouteCollection(
 		inputs.HTTPRoutes,
 		routeInputs,
 		opts,
 	)
-	status.RegisterStatus(c.status, httpRoutes.Status)
+	status.RegisterStatus(c.status, httpRoutes.Status, GetStatus)
 	grpcRoutes := GRPCRouteCollection(
 		inputs.GRPCRoutes,
 		routeInputs,
 		opts,
 	)
-	status.RegisterStatus(c.status, grpcRoutes.Status)
+	status.RegisterStatus(c.status, grpcRoutes.Status, GetStatus)
 
 	RouteAttachments := krt.JoinCollection([]krt.Collection[RouteAttachment]{
 		tcpRoutes.RouteAttachments,
@@ -291,7 +308,7 @@ func NewController(
 	})
 
 	GatewayFinalStatus := FinalGatewayStatusCollection(GatewaysStatus, RouteAttachments, RouteAttachmentsIndex, opts)
-	status.RegisterStatus(c.status, GatewayFinalStatus)
+	status.RegisterStatus(c.status, GatewayFinalStatus, GetStatus)
 
 	VirtualServices := krt.JoinCollection([]krt.Collection[*config.Config]{
 		tcpRoutes.VirtualServices,
@@ -475,8 +492,8 @@ func (c *Controller) HasSynced() bool {
 	return true
 }
 
-func (c *Controller) SecretAllowed(resourceName string, namespace string) bool {
-	return c.outputs.ReferenceGrants.SecretAllowed(nil, resourceName, namespace)
+func (c *Controller) SecretAllowed(ourKind config.GroupVersionKind, resourceName string, namespace string) bool {
+	return c.outputs.ReferenceGrants.SecretAllowed(nil, ourKind, resourceName, namespace)
 }
 
 func pushXds[T any](xds model.XDSUpdater, f func(T) model.ConfigKey) func(events []krt.Event[T]) {

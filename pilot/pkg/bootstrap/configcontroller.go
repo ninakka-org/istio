@@ -33,10 +33,10 @@ import (
 	"istio.io/istio/pilot/pkg/autoregistration"
 	configaggregate "istio.io/istio/pilot/pkg/config/aggregate"
 	"istio.io/istio/pilot/pkg/config/kube/crdclient"
+	"istio.io/istio/pilot/pkg/config/kube/file"
 	"istio.io/istio/pilot/pkg/config/kube/gateway"
 	ingress "istio.io/istio/pilot/pkg/config/kube/ingress"
 	"istio.io/istio/pilot/pkg/config/memory"
-	configmonitor "istio.io/istio/pilot/pkg/config/monitor"
 	istioCredentials "istio.io/istio/pilot/pkg/credentials"
 	"istio.io/istio/pilot/pkg/credentials/kube"
 	"istio.io/istio/pilot/pkg/features"
@@ -79,10 +79,12 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 		}
 	} else if args.RegistryOptions.FileDir != "" {
 		// Local files - should be added even if other options are specified
-		store := memory.Make(collections.Pilot)
-		configController := memory.NewController(store)
-
-		err := s.makeFileMonitor(args.RegistryOptions.FileDir, args.RegistryOptions.KubeOptions.DomainSuffix, configController)
+		configController, err := file.NewController(
+			args.RegistryOptions.FileDir,
+			args.RegistryOptions.KubeOptions.DomainSuffix,
+			collections.Pilot,
+			args.RegistryOptions.KubeOptions,
+		)
 		if err != nil {
 			return err
 		}
@@ -146,7 +148,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 	}
 	configController := s.makeKubeConfigController(args)
 	s.ConfigStores = append(s.ConfigStores, configController)
-	tw := revisions.NewTagWatcher(s.kubeClient, args.Revision)
+	tw := revisions.NewTagWatcher(s.kubeClient, args.Revision, args.Namespace)
 	s.addStartFunc("tag-watcher", func(stop <-chan struct{}) error {
 		go tw.Run(stop)
 		return nil
@@ -193,7 +195,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 					AddRunFunction(func(leaderStop <-chan struct{}) {
 						// We can only run this if the Gateway CRD is created
 						if s.kubeClient.CrdWatcher().WaitForCRD(gvr.KubernetesGateway, leaderStop) {
-							tagWatcher := revisions.NewTagWatcher(s.kubeClient, args.Revision)
+							tagWatcher := revisions.NewTagWatcher(s.kubeClient, args.Revision, args.Namespace)
 							controller := gateway.NewDeploymentController(s.kubeClient, s.clusterID, s.environment,
 								s.webhookInfo.getWebhookConfig, s.webhookInfo.addHandler, tagWatcher, args.Revision, args.Namespace)
 							// Start informers again. This fixes the case where informers for namespace do not start,
@@ -256,10 +258,13 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
 			if srcAddress.Path == "" {
 				return fmt.Errorf("invalid fs config URL %s, contains no file path", configSource.Address)
 			}
-			store := memory.Make(collections.Pilot)
-			configController := memory.NewController(store)
 
-			err := s.makeFileMonitor(srcAddress.Path, args.RegistryOptions.KubeOptions.DomainSuffix, configController)
+			configController, err := file.NewController(
+				srcAddress.Path,
+				args.RegistryOptions.KubeOptions.DomainSuffix,
+				collections.Pilot,
+				args.RegistryOptions.KubeOptions,
+			)
 			if err != nil {
 				return err
 			}
@@ -349,6 +354,7 @@ func (s *Server) makeKubeConfigController(args *PilotArgs) *crdclient.Client {
 		Revision:     args.Revision,
 		DomainSuffix: args.RegistryOptions.KubeOptions.DomainSuffix,
 		Identifier:   "crd-controller",
+		KrtDebugger:  args.KrtDebugger,
 	}
 
 	schemas := collections.Pilot
@@ -358,19 +364,6 @@ func (s *Server) makeKubeConfigController(args *PilotArgs) *crdclient.Client {
 	schemas = schemas.Add(collections.Ingress)
 
 	return crdclient.NewForSchemas(s.kubeClient, opts, schemas)
-}
-
-func (s *Server) makeFileMonitor(fileDir string, domainSuffix string, configController model.ConfigStore) error {
-	fileSnapshot := configmonitor.NewFileSnapshot(fileDir, collections.Pilot, domainSuffix)
-	fileMonitor := configmonitor.NewMonitor("file-monitor", configController, fileSnapshot.ReadConfigFiles, fileDir)
-
-	// Defer starting the file monitor until after the service is created.
-	s.addStartFunc("file monitor", func(stop <-chan struct{}) error {
-		fileMonitor.Start(stop)
-		return nil
-	})
-
-	return nil
 }
 
 // getTransportCredentials attempts to create credentials.TransportCredentials from ClientTLSSettings in mesh config

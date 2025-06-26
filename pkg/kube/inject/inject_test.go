@@ -440,6 +440,17 @@ func TestInjection(t *testing.T) {
 			},
 		},
 		{
+			in:   "hello-openshift-tproxy.yaml",
+			want: "hello-openshift-tproxy.yaml.injected",
+			setFlags: []string{
+				"components.cni.enabled=true",
+			},
+			skipInjection: true,
+			setup: func(t test.Failer) {
+				test.SetEnvForTest(t, platform.Platform.Name, platform.OpenShift)
+			},
+		},
+		{
 			// Validates localhost probes get injected correctly
 			in:   "hello-probes-localhost.yaml",
 			want: "hello-probes-localhost.yaml.injected",
@@ -448,6 +459,16 @@ func TestInjection(t *testing.T) {
 					Mode: meshapi.MeshConfig_InboundTrafficPolicy_LOCALHOST,
 				}
 			},
+		},
+		{
+			in:         "sidecar-spire.yaml",
+			want:       "sidecar-spire.yaml.injected",
+			inFilePath: "spire-template.iop.yaml",
+		},
+		{
+			in:         "gateway-spire.yaml",
+			want:       "gateway-spire.yaml.injected",
+			inFilePath: "spire-template.iop.yaml",
 		},
 	}
 	// Keep track of tests we add options above

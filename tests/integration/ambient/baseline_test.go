@@ -631,9 +631,10 @@ kind: EnvoyFilter
 metadata:
   name: inbound
 spec:
-  workloadSelector:
-    labels:
-      gateway.networking.k8s.io/gateway-name: "{{.Destination}}"
+  targetRefs:
+  - kind: Gateway
+    name: waypoint
+    group: gateway.networking.k8s.io
   configPatches:
   - applyTo: HTTP_FILTER
     match:
@@ -1558,6 +1559,7 @@ func TestL7JWT(t *testing.T) {
 						WithAuthz(jwt.TokenIssuer1).
 						Build()
 					opt.Check = check.OK()
+					src.CallOrFail(t, opt)
 				})
 
 				t.NewSubTest("deny with sub-3 token due to ignored RequestAuthentication").Run(func(t framework.TestContext) {

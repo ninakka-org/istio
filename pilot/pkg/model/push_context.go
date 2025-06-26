@@ -45,6 +45,7 @@ import (
 	"istio.io/istio/pkg/jwt"
 	"istio.io/istio/pkg/monitoring"
 	"istio.io/istio/pkg/network"
+	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/spiffe"
 	"istio.io/istio/pkg/util/sets"
@@ -941,6 +942,7 @@ var wellknownProviders = sets.New(
 	"envoy_otel_als",
 	"opentelemetry",
 	"envoy_file_access_log",
+	"sds", // TODO: implement this
 )
 
 func AssertProvidersHandled(expected int) {
@@ -952,7 +954,7 @@ func AssertProvidersHandled(expected int) {
 // addHostsFromMeshConfigProvidersHandled contains the number of providers we handle below.
 // This is to ensure this stays in sync as new handlers are added
 // STOP. DO NOT UPDATE THIS WITHOUT UPDATING extraServicesForProxy.
-const addHostsFromMeshConfigProvidersHandled = 14
+const addHostsFromMeshConfigProvidersHandled = 15
 
 // extraServicesForProxy returns a subset of services referred from the proxy gateways, including:
 // 1. MeshConfig.ExtensionProviders
@@ -980,18 +982,14 @@ func (ps *PushContext) extraServicesForProxy(proxy *Proxy, patches *MergedEnvoyF
 			addService(p.EnvoyExtAuthzGrpc.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_Zipkin:
 			addService(p.Zipkin.Service)
-		//nolint: staticcheck  // Lightstep deprecated
 		case *meshconfig.MeshConfig_ExtensionProvider_Lightstep:
 			log.Warnf("Lightstep provider is deprecated, please use OpenTelemetry instead")
-			addService(p.Lightstep.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_Datadog:
 			addService(p.Datadog.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_Skywalking:
 			addService(p.Skywalking.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_Opencensus:
 			log.Warnf("Opencensus provider is deprecated, please use OpenTelemetry instead")
-			//nolint: staticcheck
-			addService(p.Opencensus.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_Opentelemetry:
 			addService(p.Opentelemetry.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpAls:
@@ -1000,6 +998,9 @@ func (ps *PushContext) extraServicesForProxy(proxy *Proxy, patches *MergedEnvoyF
 			addService(p.EnvoyTcpAls.Service)
 		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyOtelAls:
 			addService(p.EnvoyOtelAls.Service)
+		case *meshconfig.MeshConfig_ExtensionProvider_Sds:
+			addService(p.Sds.Service)
+			// TODO: implement SDS provider
 		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog: // No services
 		case *meshconfig.MeshConfig_ExtensionProvider_Prometheus: // No services
 		case *meshconfig.MeshConfig_ExtensionProvider_Stackdriver: // No services
@@ -1152,6 +1153,16 @@ func (ps *PushContext) DelegateVirtualServices(vses []config.Config) []ConfigHas
 // Callers can check if the sidecarScope is from user generated object or not
 // by checking the sidecarScope.Config field, that contains the user provided config
 func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Instance) *SidecarScope {
+	sidecar := ps.doGetSidecarScope(proxy, workloadLabels)
+	// we need to make sure sidecar scope is initiaized before returning
+	if sidecar != nil && features.EnableLazySidecarEvaluation {
+		sidecar.initFunc()
+	}
+
+	return sidecar
+}
+
+func (ps *PushContext) doGetSidecarScope(proxy *Proxy, workloadLabels labels.Instance) *SidecarScope {
 	// TODO: logic to merge multiple sidecar resources
 	// Currently we assume that there will be only one sidecar config for a namespace.
 	sidecars, hasSidecar := ps.sidecarIndex.sidecarsByNamespace[proxy.ConfigNamespace]
@@ -1193,6 +1204,7 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Insta
 					// return exact/wildcard matching one directly
 					return wrapper
 				}
+
 				// this happens at last, it is the default sidecar scope
 				return wrapper
 			}
@@ -2330,8 +2342,9 @@ func (ps *PushContext) EnvoyFilters(proxy *Proxy) *MergedEnvoyFilterWrapper {
 // if there is a workload selector, check for matching workload labels
 func (ps *PushContext) getMatchedEnvoyFilters(proxy *Proxy, namespaces string) []*EnvoyFilterWrapper {
 	matchedEnvoyFilters := make([]*EnvoyFilterWrapper, 0)
+	matcher := PolicyMatcherForProxy(proxy)
 	for _, efw := range ps.envoyFiltersByNamespace[namespaces] {
-		if efw.workloadSelector == nil || efw.workloadSelector.SubsetOf(proxy.Labels) {
+		if matcher.ShouldAttachPolicy(gvk.EnvoyFilter, efw.NamespacedName(), efw) {
 			matchedEnvoyFilters = append(matchedEnvoyFilters, efw)
 		}
 	}
@@ -2405,9 +2418,10 @@ func (ps *PushContext) mergeGateways(proxy *Proxy) *MergedGateway {
 		if gwsvcstr, f := cfg.Annotations[InternalGatewayServiceAnnotation]; f {
 			gwsvcs := strings.Split(gwsvcstr, ",")
 			known := sets.New[string](gwsvcs...)
+			cfgNamespace := ptr.NonEmptyOrDefault(cfg.Annotations[constants.InternalParentNamespace], cfg.Namespace)
 			matchingInstances := make([]ServiceTarget, 0, len(proxy.ServiceTargets))
 			for _, si := range proxy.ServiceTargets {
-				if _, f := known[string(si.Service.Hostname)]; f && si.Service.Attributes.Namespace == cfg.Namespace {
+				if _, f := known[string(si.Service.Hostname)]; f && si.Service.Attributes.Namespace == cfgNamespace {
 					matchingInstances = append(matchingInstances, si)
 				}
 			}
@@ -2541,21 +2555,13 @@ func (ps *PushContext) initKubernetesGateways(env *Environment) {
 	}
 }
 
-// ReferenceAllowed determines if a given resource (of type `kind` and name `resourceName`) can be
+// SecretAllowed determines if a given resource (of type `Secret` and name `resourceName`) can be
 // accessed by `namespace`, based of specific reference policies.
 // Note: this function only determines if a reference is *explicitly* allowed; the reference may not require
 // explicit authorization to be made at all in most cases. Today, this only is for allowing cross-namespace
 // secret access.
-func (ps *PushContext) ReferenceAllowed(kind config.GroupVersionKind, resourceName string, namespace string) bool {
-	// Currently, only Secret has reference policy, and only implemented by Gateway API controller.
-	switch kind {
-	case gvk.Secret:
-		if ps.GatewayAPIController != nil {
-			return ps.GatewayAPIController.SecretAllowed(resourceName, namespace)
-		}
-	default:
-	}
-	return false
+func (ps *PushContext) SecretAllowed(ourKind config.GroupVersionKind, resourceName string, namespace string) bool {
+	return ps.GatewayAPIController.SecretAllowed(ourKind, resourceName, namespace)
 }
 
 func (ps *PushContext) ServiceAccounts(hostname host.Name, namespace string) []string {

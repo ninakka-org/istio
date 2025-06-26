@@ -193,6 +193,42 @@ func TestInjectRequired(t *testing.T) {
 			config: &Config{
 				Policy: InjectionPolicyEnabled,
 			},
+			podSpec: podSpec,
+			meta: metav1.ObjectMeta{
+				Name:        "invalid-inject-value-yes",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotation.SidecarInject.Name: "yes"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy: InjectionPolicyDisabled,
+			},
+			podSpec: podSpec,
+			meta: metav1.ObjectMeta{
+				Name:        "invalid-inject-value-on",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotation.SidecarInject.Name: "on"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
+			podSpec: podSpec,
+			meta: metav1.ObjectMeta{
+				Name:      "invalid-inject-value-random",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{label.SidecarInject.Name: "random"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpecHostNetwork,
 			meta: metav1.ObjectMeta{
 				Name:        "force-off-policy",
@@ -1245,6 +1281,36 @@ func TestMergeOrAppendProbers(t *testing.T) {
 				{
 					Name:  "TEST_ENV_VAR2",
 					Value: "value2",
+				},
+			},
+		},
+		{
+			// this is to test previously injected without probe rewrites
+			name:               "Merge Prober with absent of KubeAppProberEnv",
+			perviouslyInjected: true,
+			in: []corev1.EnvVar{
+				{
+					Name:  "TEST_ENV_VAR1",
+					Value: "value1",
+				},
+				{
+					Name:  "TEST_ENV_VAR2",
+					Value: "value2",
+				},
+			},
+			probers: `{"/app-health/bar/livez":{"httpGet":{"path":"/","port":9000,"scheme":"HTTP"}}}`,
+			want: []corev1.EnvVar{
+				{
+					Name:  "TEST_ENV_VAR1",
+					Value: "value1",
+				},
+				{
+					Name:  "TEST_ENV_VAR2",
+					Value: "value2",
+				},
+				{
+					Name:  status.KubeAppProberEnvName,
+					Value: `{"/app-health/bar/livez":{"httpGet":{"path":"/","port":9000,"scheme":"HTTP"}}}`,
 				},
 			},
 		},

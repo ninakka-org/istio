@@ -203,7 +203,7 @@ spec:
     - name: istio-podinfo
       mountPath: /etc/istio/pod
   volumes:
-  - emptyDir: {}
+  - emptyDir:
     name: workload-socket
   - emptyDir: {}
     name: credential-socket
@@ -248,8 +248,8 @@ spec:
     projected:
       sources:
       - clusterTrustBundle:
-        name: istio.io:istiod-ca:{{ .Values.global.trustBundleName | default "root-cert" }}
-        path: root-cert.pem
+          name: istio.io:istiod-ca:{{ .Values.global.trustBundleName | default "root-cert" }}
+          path: root-cert.pem
   {{- else }}
     configMap:
       name: {{ .Values.global.trustBundleName | default "istio-ca-root-cert" }}

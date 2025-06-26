@@ -89,6 +89,9 @@ const (
 	// The data name in the ConfigMap of each namespace storing the root cert of non-Kube CA.
 	CACertNamespaceConfigMapDataName = "root-cert.pem"
 
+	// CACRLNamespaceConfigMapDataName in the ConfigMap of each namespace storing the CRL of plugged in CA certificates.
+	CACRLNamespaceConfigMapDataName = "ca-crl.pem"
+
 	// PodInfoLabelsPath is the filepath that pod labels will be stored
 	// This is typically set by the downward API
 	PodInfoLabelsPath = "./etc/istio/pod/labels"
@@ -126,7 +129,9 @@ const (
 	// InternalParentNames declares the original resources of an internally-generated config.
 	// This is used by k8s gateway-api.
 	// It is a comma separated list. For example, "HTTPRoute/foo.default,HTTPRoute/bar.default"
-	InternalParentNames      = "internal.istio.io/parents"
+	InternalParentNames = "internal.istio.io/parents"
+	// InternalParentNamespace contains, for internally-generated resource, the namespace of the parent, if different then current.
+	InternalParentNamespace  = "internal.istio.io/parent-namespace"
 	InternalRouteSemantics   = "internal.istio.io/route-semantics"
 	RouteSemanticsIngress    = "ingress"
 	RouteSemanticsGateway    = "gateway"
